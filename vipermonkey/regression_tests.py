@@ -36,6 +36,7 @@ class maldoc(object):
 @pytest.mark.cdf2
 @pytest.mark.debug_print
 @pytest.mark.combobox
+@pytest.mark.textbox
 def test_1a1c4b3314857aed3c55053968fa6260693577ee18e59f29be78e9add0e52840(path):
 	t=maldoc(path+'1a1c4b3314857aed3c55053968fa6260693577ee18e59f29be78e9add0e52840')
 	r=t.run()
@@ -43,6 +44,7 @@ def test_1a1c4b3314857aed3c55053968fa6260693577ee18e59f29be78e9add0e52840(path):
 
 @pytest.mark.emotet
 @pytest.mark.cdf2
+@pytest.mark.textbox
 def test_773755f3164a339938ccb87bd223515247a372db0b400677b7a0a11709b4e070(path):
 	t=maldoc(path+'773755f3164a339938ccb87bd223515247a372db0b400677b7a0a11709b4e070')
 	r=t.run()
@@ -50,6 +52,7 @@ def test_773755f3164a339938ccb87bd223515247a372db0b400677b7a0a11709b4e070(path):
 
 @pytest.mark.emotet
 @pytest.mark.cdf2
+@pytest.mark.textbox
 def test_9f36d3b724b46fa352ca56e371fd3322f7fea335fe59a71c36a046fb29c034cc(path):
 	t=maldoc(path+'9f36d3b724b46fa352ca56e371fd3322f7fea335fe59a71c36a046fb29c034cc')
 	r=t.run()
@@ -57,6 +60,7 @@ def test_9f36d3b724b46fa352ca56e371fd3322f7fea335fe59a71c36a046fb29c034cc(path):
 
 @pytest.mark.emotet
 @pytest.mark.cdf2
+@pytest.mark.textbox
 def test_41743d480c3a97d8475eaa4958e46a6e9df7a3f25a034194b5ba57e43e664ed2(path):
 	t=maldoc(path+'41743d480c3a97d8475eaa4958e46a6e9df7a3f25a034194b5ba57e43e664ed2')
 	r=t.run()
