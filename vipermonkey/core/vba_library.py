@@ -482,6 +482,12 @@ class Execute(VbaLibraryFunc):
 
     def eval(self, context, params=None):
 
+        # Sanity check.
+        if ((len(params) == 0) or
+            (isinstance(params[0], VBA_Object)) or
+            (isinstance(params[0], VbaLibraryFunc))):
+            return "NULL"
+        
         # Save the command.
         command = strip_nonvb_chars(str(params[0]))
         # Why am I doing this?
@@ -2593,7 +2599,7 @@ class Cells(VbaLibraryFunc):
 
             # Return the cell contents.
             try:
-                r = str(sheet.cell(col, row)).replace("text:", "").replace("'", "")
+                r = str(sheet.cell(row, col)).replace("text:", "").replace("'", "")
                 if (r.startswith('u')):
                     r = r[1:]
                 log.debug("Excel Read: Cell(" + str(col) + ", " + str(row) + ") = '" + str(r) + "'")
