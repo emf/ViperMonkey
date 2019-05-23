@@ -34,6 +34,13 @@ class maldoc(object):
 
 @pytest.mark.emotet
 @pytest.mark.cdf2
+def test_1a1c4b3314857aed3c55053968fa6260693577ee18e59f29be78e9add0e52840(path):
+	t=maldoc(path+'1a1c4b3314857aed3c55053968fa6260693577ee18e59f29be78e9add0e52840')
+	r=t.run()
+	assert r == None
+
+@pytest.mark.emotet
+@pytest.mark.cdf2
 def test_773755f3164a339938ccb87bd223515247a372db0b400677b7a0a11709b4e070(path):
 	t=maldoc(path+'773755f3164a339938ccb87bd223515247a372db0b400677b7a0a11709b4e070')
 	r=t.run()
