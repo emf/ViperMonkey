@@ -72,18 +72,17 @@ class Module(VBA_Object):
         self.global_vars = {}
         self.loose_lines = []
 
-        # Save all function/sub definitions.
-        visitor = function_defn_visitor()
-        self.accept(visitor)
-        for f in visitor.func_objects:
-            log.debug("saving func decl: %r" % f.name)
-            self.functions[f.name] = f
-        
         for token in tokens:
             if isinstance(token, If_Statement_Macro):
                 for n in token.external_functions.keys():
                     log.debug("saving external func decl: %r" % n)
                     self.external_functions[n] = token.external_functions[n]
+            if isinstance(token, Sub):
+                log.debug("saving sub decl: %r" % token.name)
+                self.subs[token.name] = token
+            if isinstance(token, Function):
+               log.debug("saving func decl: %r" % token.name)
+               self.functions[token.name] = token
             if isinstance(token, External_Function):
                 log.debug("saving external func decl: %r" % token.name)
                 self.external_functions[token.name] = token
@@ -103,11 +102,24 @@ class Module(VBA_Object):
                 self.loose_lines.append(token)
 
             elif isinstance(token, LooseLines):
+
+                # Save the loose lines block itself.
                 self.loose_lines.append(token)
+
+                # Function and Sub definitions could be in the loose lines block.
+                # Save those also.
+                for curr_statement in token.block:
+                    if isinstance(curr_statement, Sub):
+                        log.debug("saving sub decl: %r" % curr_statement.name)
+                        self.subs[curr_statement.name] = curr_statement
+                    if isinstance(curr_statement, Function):
+                        log.debug("saving func decl: %r" % curr_statement.name)
+                        self.functions[curr_statement.name] = curr_statement
+                    if isinstance(curr_statement, External_Function):
+                        log.debug("saving external func decl: %r" % curr_statement.name)
+                        self.external_functions[curr_statement.name] = curr_statement
                     
         self.name = self.attributes.get('VB_Name', None)
-        # TODO: should not use print
-        print(self)
 
     def __repr__(self):
         r = 'Module %r\n' % self.name
@@ -121,6 +133,18 @@ class Module(VBA_Object):
 
     def eval(self, context, params=None):
 
+        # Perform all of the const assignments first.
+        for block in self.loose_lines:
+            if (isinstance(block, Sub) or
+                isinstance(block, Function) or
+                isinstance(block, External_Function)):
+                log.debug("Skip loose line const eval of " + str(block))
+                continue
+            if (isinstance(block, LooseLines)):
+                context.global_scope = True
+                do_const_assignments(block.block, context)
+                context.global_scope = False
+        
         # Emulate the loose line blocks (statements that appear outside sub/func
         # defs) in order.
         done_emulation = False
@@ -145,16 +169,16 @@ class Module(VBA_Object):
         """
         
         for name, _sub in self.subs.items():
-            log.debug('storing sub "%s" in globals' % name)
+            log.debug('(1) storing sub "%s" in globals' % name)
             context.set(name, _sub)
         for name, _function in self.functions.items():
-            log.debug('storing function "%s" in globals' % name)
+            log.debug('(1) storing function "%s" in globals' % name)
             context.set(name, _function)
         for name, _function in self.external_functions.items():
-            log.debug('storing external function "%s" in globals' % name)
+            log.debug('(1) storing external function "%s" in globals' % name)
             context.set(name, _function)
         for name, _var in self.global_vars.items():
-            log.debug('storing global var "%s" = %s in globals (1)' % (name, str(_var)))
+            log.debug('(1) storing global var "%s" = %s in globals (1)' % (name, str(_var)))
             if (isinstance(name, str)):
                 context.set(name, _var)
             if (isinstance(name, list)):
@@ -187,7 +211,8 @@ module_header = ZeroOrMore(header_statements_line)
 
 loose_lines = Forward()
 #declaration_statement = external_function | global_variable_declaration | loose_lines | option_statement | dim_statement | rem_statement
-declaration_statement = external_function | loose_lines | global_variable_declaration | option_statement | dim_statement | rem_statement
+declaration_statement = external_function | loose_lines | global_variable_declaration | \
+                        option_statement | dim_statement | rem_statement | type_declaration
 declaration_statements_line = Optional(declaration_statement + ZeroOrMore(Suppress(':') + declaration_statement)) \
                               + EOL.suppress()
 
@@ -223,6 +248,9 @@ class LooseLines(VBA_Object):
         #if (context.exit_func):
         #    return
 
+        # Assign all const variables first.
+        do_const_assignments(self.block, context)
+        
         # Emulate the statements in the block.
         log.info("Emulating " + str(self) + " ...")
         context.global_scope = True
@@ -253,23 +281,48 @@ loose_lines <<= OneOrMore(tagged_block ^ (block_statement + EOS.suppress()))('bl
 loose_lines.setParseAction(LooseLines)
 
 # TODO: add optional empty lines after each sub/function?
-module_code = ZeroOrMore(option_statement | sub | function | Suppress(empty_line) | simple_if_statement_macro | loose_lines)
+module_code = ZeroOrMore(
+    option_statement
+    | sub
+    | function
+    | Suppress(empty_line)
+    | simple_if_statement_macro
+    | loose_lines
+    | type_declaration
+)
 
 module_body = module_declaration + module_code
 
-module = module_header + module_body
+#module = module_header + module_body
+module = ZeroOrMore(
+    option_statement
+    | sub
+    | function
+    | Suppress(empty_line)
+    | simple_if_statement_macro
+    | loose_lines
+    | type_declaration
+    | declaration_statements_line
+    | header_statements_line
+)
 module.setParseAction(Module)
 
 # === LINE PARSER ============================================================
 
 # Parser matching any line of VBA code:
-vba_line = declaration_statements_line \
-        | sub_start_line \
-        | sub_end \
-        | function_start \
-        | function_end \
-        | for_start \
-        | for_end \
-        | header_statements_line \
-        | simple_statements_line \
-        | empty_line
+vba_line = (
+    sub_start_line
+    | sub_end
+    | function_start
+    | function_end
+    | for_start
+    | for_end
+    | header_statements_line
+    # check if we have a basic literal before checking simple_statement_line
+    # otherwise we will get things like "Chr(36)" being reported as a Call_Statement
+    | (expr_const + EOL.suppress())
+    | simple_statements_line
+    | declaration_statements_line
+    | empty_line
+    | (expression + EOL.suppress())
+)

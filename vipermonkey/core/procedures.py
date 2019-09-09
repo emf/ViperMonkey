@@ -95,7 +95,7 @@ class Sub(VBA_Object):
 
         # Set given parameter values.
         self.byref_params = {}
-        if params is not None:
+        if ((params is not None) and (len(params) == len(self.params))):
 
             # TODO: handle named parameters
             for i in range(len(params)):
@@ -109,7 +109,7 @@ class Sub(VBA_Object):
                     param_value = ""
 
                 # Coerce parameters to String if needed.
-                if (self.params[i].my_type == "String"):
+                if ((self.params[i].my_type == "String") and (not self.params[i].is_array)):
                     param_value = str(param_value)
                     
                 # Add the parameter value to the local function context.
@@ -132,6 +132,9 @@ class Sub(VBA_Object):
         # Add the current call to the call stack.
         context.call_stack.append(call_info)
 
+        # Assign all const variables first.
+        do_const_assignments(self.statements, context)
+        
         # Set the parameter values in the current context.
         for param_name in call_info.keys():
             context.set(param_name, call_info[param_name], force_local=True)
@@ -172,7 +175,11 @@ class Sub(VBA_Object):
             
         # Handle trailing if's with no end if.
         if (self.bogus_if is not None):
-            self.bogus_if.eval(context=context)
+            if (isinstance(self.bogus_if, VBA_Object)):
+                self.bogus_if.eval(context=context)
+            elif (isinstance(self.bogus_if, list)):
+                for cmd in self.bogus_if:
+                    cmd.eval(context=context)
 
         # Save the values of the ByRef parameters.
         for byref_param in self.byref_params.keys():
@@ -237,7 +244,7 @@ function_name = Combine(identifier + Suppress(Optional(type_suffix))) | lifecycl
 #
 # MS-GRAMMAR: end-label = statement-label-definition
 
-end_label = statement_label_definition
+#end_label = statement_label_definition
 
 # MS-GRAMMAR: procedure-tail = [WS] LINE-END / single-quote comment-body / ":" rem-statement
 
@@ -266,7 +273,7 @@ procedure_tail = FollowedBy(line_terminator) | comment_single_quote | Literal(":
 #       [procedure-body EOS]
 #       [end-label] "end" "property" procedure-tail
 
-sub_start = Optional(CaselessKeyword('Static')) + public_private + CaselessKeyword('Sub').suppress() + lex_identifier('sub_name') \
+sub_start = Optional(CaselessKeyword('Static')) + public_private + Optional(CaselessKeyword('Static')) + CaselessKeyword('Sub').suppress() + lex_identifier('sub_name') \
             + Optional(params_list_paren) + EOS.suppress()
 sub_start_single = Optional(CaselessKeyword('Static')) + public_private + CaselessKeyword('Sub').suppress() + lex_identifier('sub_name') \
                    + Optional(params_list_paren) + Suppress(':')
@@ -357,9 +364,23 @@ class Function(VBA_Object):
                 init_val = eval_arg(param.init_val, context=context)
             call_info[param.name] = init_val
 
+        # Array accesses of calls to functions that return an array are parsed as
+        # function calls with the array indices given as function call arguments. Note
+        # that this parsing problem only occurs for 0 argument functions (foo(12)).
+        # Array accesses of functions with parameters look like 'bar(1,2,3)(12)', so they
+        # parse properly.
+        #
+        # Check for the 0 parameter function array access case here.
+        array_indices = None
+        if ((self.params is not None) and
+            (params is not None) and
+            (len(self.params) == 0) and
+            (len(params) > 0)):
+            array_indices = params
+            
         # Set given parameter values.
         self.byref_params = {}
-        if params is not None:
+        if ((params is not None) and (len(params) <= len(self.params))):
 
             # TODO: handle named parameters
             for i in range(len(params)):
@@ -396,6 +417,9 @@ class Function(VBA_Object):
         # Add the current call to the call stack.
         context.call_stack.append(call_info)
 
+        # Assign all const variables first.
+        do_const_assignments(self.statements, context)
+        
         # Set the parameter values in the current context.
         for param_name in call_info.keys():
             context.set(param_name, call_info[param_name], force_local=True)
@@ -448,7 +472,8 @@ class Function(VBA_Object):
 
             # Save the values of the ByRef parameters.
             for byref_param in self.byref_params.keys():
-                self.byref_params[byref_param] = context.get(byref_param[0].lower())
+                if (context.contains(byref_param[0].lower())):
+                    self.byref_params[byref_param] = context.get(byref_param[0].lower())
 
             # Get the return value.
             return_value = context.get(self.name)
@@ -459,7 +484,34 @@ class Function(VBA_Object):
             # Convert the return value to a String if needed.
             if ((self.return_type == "String") and (not isinstance(return_value, str))):
                 return_value = coerce_to_string(return_value)
-            
+
+            # Handle array accesses of the results of 0 parameter functions if needed.
+            if (array_indices is not None):
+
+                # Does the function actually return an array?
+                if (isinstance(return_value, list)):
+
+                    # Are the array indices valid?
+                    all_int = True
+                    for i in array_indices:
+                        if (not isinstance(i, int)):
+                            all_int = False
+                            break
+                    if (all_int):
+
+                        # Perform the array access.
+                        for i in array_indices:
+                            return_value = return_value[i]
+
+                    # Invalid array indices.
+                    else:
+                        log.warn("Array indices " + str(array_indices) + " are invalid. " + \
+                                 "Not doing array access of function return value.")
+
+                # Function does not return array.
+                else:
+                    log.warn(str(self) + " does not return an array. Not doing array access.")
+
             return return_value
 
         except KeyError:
