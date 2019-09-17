@@ -191,6 +191,8 @@ class MemberAccessExpression(VBA_Object):
             tokens = tokens[0][0]
             self.rhs = tokens[1:]
             self.lhs = tokens.lhs
+            if ((isinstance(self.lhs, list) or isinstance(self.lhs, pyparsing.ParseResults)) and (len(self.lhs) > 0)):
+                self.lhs = self.lhs[0]
             self.rhs1 = ""
             if (hasattr(tokens, "rhs1")):
                 self.rhs1 = tokens.rhs1
@@ -222,9 +224,36 @@ class MemberAccessExpression(VBA_Object):
         """
         Handle references to the .Count field of the current item.
         """
-        if (isinstance(curr_item, list)):
+        if ((".count" in str(self).lower()) and (isinstance(curr_item, list))):
             return len(curr_item)
-    
+
+    def _handle_item(self, context, curr_item):
+        """
+        Handle accessing a list item.
+        """
+
+        # Only works for lists.
+        if (not isinstance(curr_item, list)):
+            return None
+
+        # Do we have an Item() call?
+        if (".item(" not in str(self).lower()):
+            return None
+
+        # Get the index.
+        tmp_rhs = self.rhs
+        if (isinstance(tmp_rhs, list) and (len(tmp_rhs) > 0)):
+            tmp_rhs = tmp_rhs[0]
+        if ((not isinstance(tmp_rhs, Function_Call)) or
+            (tmp_rhs.name != "Item")):
+            return None
+        index = eval_arg(tmp_rhs.params[0], context)
+        if ((not isinstance(index, int)) or (index >= len(curr_item))):
+            return None
+
+        # Return the list item.
+        return curr_item[index]
+        
     def _handle_oslanguage(self, context):
         """
         Handle references to the OSlanguage field.
@@ -398,12 +427,33 @@ class MemberAccessExpression(VBA_Object):
         tmp = self.__repr__().lower()
         if (tmp.startswith("activedocument.variables(")):
             return eval_arg(self.__repr__(), context)
-
+        
         # Now widen this up to more general data that can be read from the
         # doc.
         if ("(" in tmp):
             tmp = tmp[:tmp.rindex("(")]
-        return context.get_doc_var(tmp)
+        val = context.get_doc_var(tmp)
+
+        # Are we referencing an item by index?
+        # zQGGrrccT('0').Caption
+        if (("(" in str(self.lhs)) and
+            (isinstance(self.lhs, Function_Call)) and
+            (val is not None) and
+            (isinstance(val, list))):
+
+            # Get the index.
+            if (len(self.lhs.params) > 0):
+                index = eval_arg(self.lhs.params[0], context)
+                if ((isinstance(index, int)) and (index < len(val))):
+                    val = val[index]
+
+        # Are we referencing a field?
+        rhs = str(self.rhs).lower().replace("'", "").replace("[", "").replace("]", "")
+        if ((isinstance(val, dict)) and (rhs in val)):
+            val = val[rhs]
+                    
+        # Return the value.
+        return val
 
     def _handle_text_file_read(self, context):
         """
@@ -500,7 +550,7 @@ class MemberAccessExpression(VBA_Object):
             return None
         if (rhs.name != "Replace"):
             return None
-        if (str(lhs) != "RegExp"):
+        if (not str(lhs).lower().endswith("regexp")):
             return None
 
         # Do we have a pattern for the RegExp?
@@ -766,11 +816,57 @@ class MemberAccessExpression(VBA_Object):
             return None
         r = control_val[field]
         return r
-            
+
+    def _handle_regex_execute(self, context, tmp_lhs):
+        """
+        Handle application of a RegEx object to a string via the RegEx object's Execute() method.
+        """
+
+        # Is this dealing with a RegEx object?
+        if (str(tmp_lhs).lower() != "vbscript.regexp"):
+            return None
+
+        # Are we calling the Execute() method?
+        if (".Execute(" not in str(self)):
+            return None
+
+        # We are doing a regex execute. Pull out the regex pattern and string
+        # to which to apply the regex.
+
+        # Get pattern.
+        pat_var = str(self.lhs).lower() + ".pattern"
+        pat = None
+        try:
+            pat = context.get(pat_var)
+        except KeyError:
+
+            # Don't have a pattern.
+            return None
+
+        # Get string.
+        tmp_rhs = self.rhs
+        if (isinstance(tmp_rhs, list) and (len(tmp_rhs) > 0)):
+            tmp_rhs = tmp_rhs[0]
+        if ((not isinstance(tmp_rhs, Function_Call)) or
+            (tmp_rhs.name != "Execute")):
+            return None
+        mod_str = tmp_rhs.params[0]
+        try:
+            str_val = context.get(mod_str)
+            mod_str = str_val
+        except KeyError:
+
+            # Don't have a pattern.
+            return None
+
+        # Find all the regex matches in the string.
+        r = re.findall(pat, mod_str)
+        return r
+        
     def eval(self, context, params=None):
 
         log.debug("MemberAccess eval of " + str(self))
-
+        
         # Handle accessing control values from a form by index..
         call_retval = self._handle_indexed_form_access(context)
         if (call_retval is not None):
@@ -834,7 +930,17 @@ class MemberAccessExpression(VBA_Object):
         call_retval = self._handle_count(context, tmp_lhs)
         if (call_retval is not None):
             return call_retval
-            
+
+        # Handle reading an item from a data collection.
+        call_retval = self._handle_item(context, tmp_lhs)
+        if (call_retval is not None):
+            return call_retval
+
+        # Handle Regex object applications.
+        call_retval = self._handle_regex_execute(context, tmp_lhs)
+        if (call_retval is not None):
+            return call_retval
+        
         # TODO: Need to actually have some sort of object model. For now
         # just treat this as a variable access.
         tmp_rhs = None
@@ -1522,6 +1628,7 @@ expression <<= (infixNotation(expr_item,
 expression.setParseAction(lambda t: t[0])
 
 # Used in boolean expressions to limit confusion with boolean and/or and bitwise and/or.
+"""
 limited_expression = (infixNotation(expr_item,
                                     [
                                         # ("^", 2, opAssoc.RIGHT), # Exponentiation
@@ -1533,6 +1640,20 @@ limited_expression = (infixNotation(expr_item,
                                         ("&", 2, opAssoc.LEFT, Concatenation),
                                         (CaselessKeyword("xor"), 2, opAssoc.LEFT, Xor),
                                     ]))
+"""
+# Try to handle bitwise AND in boolean expressions. Needs work
+limited_expression = (infixNotation(expr_item,
+                                    [
+                                        ("-", 1, opAssoc.RIGHT, Neg), # Unary negation
+                                        ("^", 2, opAssoc.RIGHT, Power), # Exponentiation
+                                        (Regex(re.compile("[*/]")), 2, opAssoc.LEFT, MultiDiv),
+                                        ("\\", 2, opAssoc.LEFT, FloorDivision),
+                                        (CaselessKeyword("mod"), 2, opAssoc.RIGHT, Mod),
+                                        (Regex(re.compile('[-+]')), 2, opAssoc.LEFT, AddSub),
+                                        ("&", 2, opAssoc.LEFT, Concatenation),
+                                        (CaselessKeyword("xor"), 2, opAssoc.LEFT, Xor),
+                                    ])) | \
+                                    Suppress(Literal("(")) + expression + Suppress(")")
 expression.setParseAction(lambda t: t[0])
 
 # constant expression: expression without variables or function calls, that can be evaluated to a literal:
@@ -1652,7 +1773,6 @@ class BoolExprItem(VBA_Object):
             
         # Evaluate the expression.
         if ((self.op.lower() == "=") or
-            (self.op.lower() == "like") or
             (self.op.lower() == "is")):
             rhs = strip_nonvb_chars(rhs)
             lhs = strip_nonvb_chars(lhs)
@@ -1677,6 +1797,7 @@ class BoolExprItem(VBA_Object):
             rhs = str(rhs)
             lhs = str(lhs)
             try:
+                rhs = rhs.replace("*", ".*")
                 r = (re.match(rhs, lhs) is not None)
                 log.debug("'" + lhs + "' Like '" + rhs + "' == " + str(r))
                 return r

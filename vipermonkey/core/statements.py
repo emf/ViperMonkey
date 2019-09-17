@@ -411,6 +411,12 @@ def do_const_assignments(code_block, context):
     """
     Perform all of the const variable declarations in a given code block.
     """
+
+    # Make sure we can iterate.
+    if (not isinstance(code_block, list)):
+        code_block = [code_block]
+
+    # Emulate all the const assignments in the code block.
     for s in code_block:
         if (isinstance(s, Dim_Statement) and (s.decl_type.lower() == "const")):
             log.info("Pre-running const assignment '" + str(s) + "'")
@@ -2638,7 +2644,7 @@ bad_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression 
                                     Group(statement_block('statements')))
                           )
 
-_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + \
+_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + Suppress(Optional(EOS)) + \
                                    Group(simple_statements_line('statements')) )  + \
                                    ZeroOrMore(
                                        Group( CaselessKeyword("ElseIf").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + \
@@ -3253,6 +3259,7 @@ file_type = (
         | CaselessKeyword("Binary")
         | CaselessKeyword("Input")
         | CaselessKeyword("Output")
+        | CaselessKeyword("Input")
         | CaselessKeyword("Random")
     )("mode")
     + Suppress(Optional(CaselessKeyword("Lock")))
@@ -3273,6 +3280,7 @@ file_open_statement = (
         file_type("type")
         + Suppress(CaselessKeyword("As"))
         + (file_pointer("file_id") | TODO_identifier_or_object_attrib("file_id"))
+        + Suppress(Optional(CaselessKeyword("Len") + Literal("=") + expression))
     )
 )
 file_open_statement.setParseAction(File_Open)
@@ -3532,7 +3540,7 @@ class External_Function(VBA_Object):
 function_type2 = CaselessKeyword('As').suppress() + lex_identifier('return_type') \
                  + Optional(Literal('(') + Literal(')')).suppress()
 
-public_private <<= Optional(CaselessKeyword('Public') | CaselessKeyword('Private') | CaselessKeyword('Global')) + \
+public_private <<= Optional(CaselessKeyword('Public') | CaselessKeyword('Private') | CaselessKeyword('Global') | CaselessKeyword('Friend')) + \
                    Optional(CaselessKeyword('WithEvents'))
 
 params_list_paren = Suppress('(') + Optional(parameters_list('params')) + Suppress(')')
@@ -3616,6 +3624,45 @@ class NameStatement(VBA_Object):
 name_statement = CaselessKeyword('Name') + expression("old_name") + CaselessKeyword('As') + expression("new_name")
 name_statement.setParseAction(NameStatement)
 
+# --- STOP statement ----------------------------------------------------------
+
+class Stop_Statement(VBA_Object):
+    def __init__(self, original_str, location, tokens):
+        super(Stop_Statement, self).__init__(original_str, location, tokens)
+        log.debug('parsed %r' % self)
+
+    def __repr__(self):
+        return 'Stop'
+
+    def eval(self, context, params=None):
+        # Looks like this is for debugging, so we will assume execution is contunued.
+        pass
+
+stop_statement = CaselessKeyword('Stop').suppress()
+stop_statement.setParseAction(Stop_Statement)
+
+# --- LINE INPUT statement ----------------------------------------------------------
+
+class Line_Input_Statement(VBA_Object):
+    def __init__(self, original_str, location, tokens):
+        super(Line_Input_Statement, self).__init__(original_str, location, tokens)
+        self.file_id = tokens.file_id
+        self.var = tokens.var
+        log.debug('parsed %r as Line_Input_Statement' % self)
+
+    def __repr__(self):
+        return 'Line Input #' + str(self.file_id) + ", " + str(self.var)
+
+    def eval(self, context, params=None):
+
+        # TODO: Implement Line Input functionality.
+        log.warn("'Line Input' statements not emulated. Treating '" + str(self) + "' as a NOOP.")
+
+line_input_statement = CaselessKeyword('Line').suppress() + CaselessKeyword('Input').suppress() + \
+                       Literal("#").suppress() + expression("file_id") + Literal(",") + \
+                       expression("var")
+line_input_statement.setParseAction(Line_Input_Statement)
+
 # WARNING: This is a NASTY hack to handle a cyclic import problem between procedures and
 # statements. To allow local function/sub definitions the grammar elements from procedure are
 # needed here in statements. But, procedures also needs the grammar elements defined here in
@@ -3632,9 +3679,10 @@ def extend_statement_grammar():
     global statement_restricted
 
     statement <<= try_catch | type_declaration | name_as_statement | simple_for_statement | simple_for_each_statement | simple_if_statement | \
-                  simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | \
-                  with_statement| simple_statement | rem_statement | procedures.simple_function | procedures.simple_sub | name_statement
+                  line_input_statement | simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | \
+                  with_statement| simple_statement | rem_statement | procedures.simple_function | procedures.simple_sub | name_statement | stop_statement
     statement_restricted <<= try_catch | type_declaration | name_as_statement | simple_for_statement | simple_for_each_statement | simple_if_statement | \
-                             simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | name_statement | \
-                             with_statement| simple_statement_restricted | rem_statement | procedures.simple_function | procedures.simple_sub
+                             line_input_statement | simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | name_statement | \
+                             with_statement| simple_statement_restricted | rem_statement | procedures.simple_function | procedures.simple_sub | \
+                             stop_statement
 

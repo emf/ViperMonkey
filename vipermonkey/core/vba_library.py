@@ -81,6 +81,21 @@ from logger import log
 # Track the unresolved arguments to the current call.
 var_names = None
 
+class MonthName(VbaLibraryFunc):
+    """
+    MonthName() function. Currently only returns results in Italian.
+    """
+
+    def eval(self, context, params=None):
+        if ((params is None) or (len(params) == 0)):
+            return "NULL"
+        num = params[0]
+        if ((not isinstance(num, int)) or (num > 12) or (num < 1)):
+            return "NULL"
+        # TODO: Somehow specify the language for the months.
+        months = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+        return months[num-1]        
+
 class URLDownloadToFile(VbaLibraryFunc):
     """
     URLDownloadToFile() external function
@@ -142,7 +157,7 @@ class Format(VbaLibraryFunc):
         if (len(params) > 1):
             typ = str(params[1])
             if (typ.lower() == "long date"):
-                r = "giovedi 27 giugno 2019"
+                r = "gioved\xc3\xac 27 giugno 2019"
 
         # Done.
         log.debug("Format(%r): return %r" % (self, r))
@@ -440,6 +455,14 @@ class PrivateProfileString(VbaLibraryFunc):
 
     def eval(self, context, params=None):
         return "**MATCH ANY**"
+
+class EOF(VbaLibraryFunc):
+    """
+    Stubbed EOF file method.
+    """
+
+    def eval(self, context, params=None):
+        return True
 
 class Right(VbaLibraryFunc):
     """
@@ -1176,7 +1199,11 @@ class Replace(VbaLibraryFunc):
     """
 
     def eval(self, context, params=None):
-        assert len(params) >= 3
+        if (len(params) < 3):
+            if (len(params) > 0):
+                return params[0]
+            else:
+                return ""
         # TODO: Handle start, count, and compare parameters.
         string = str(params[0])
         if (string is None):
@@ -1785,6 +1812,11 @@ class Dir(VbaLibraryFunc):
         if (len(params) > 1):
             attrib = params[1]
 
+        # Handle a special case for a maldoc that looks for things
+        # not existing in a certain directory.
+        if ("\\Microsoft\\Corporation\\" in pat):
+            return ""
+            
         # Just act like we found something always.
         r = pat.replace("*", "foo")
 
@@ -3329,7 +3361,8 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                FreeFile, GetByteCount_2, GetBytes_4, TransformFinalBlock, Add, Raise, Echo,
                AddFromString, Not, PrivateProfileString, GetCursorPos, CreateElement,
                IsObject, NumPut, GetLocale, URLDownloadToFile, URLDownloadToFileA,
-               URLDownloadToFileW, SaveAs, Quit, Exists, RegRead, Kill, RmDir):
+               URLDownloadToFileW, SaveAs, Quit, Exists, RegRead, Kill, RmDir, EOF,
+               MonthName):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

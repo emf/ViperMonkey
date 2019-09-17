@@ -223,6 +223,10 @@ def collapse_macro_if_blocks(vba_code):
         # We have a block line. Save it.
         curr_block.append(line)
 
+    # Handle nested macro blocks.
+    if (r.strip() != vba_code.strip()):
+        r = collapse_macro_if_blocks(r)
+        
     # Return the stripped VBA.
     return r
 
@@ -402,11 +406,11 @@ def fix_non_ascii_names(vba_code):
     for c in vba_code:
 
         # Handle entering/leaving strings.
-        if (c == '"'):
+        if ((not in_comment) and (c == '"')):
             in_str = not in_str
 
         # Handle entering/leaving date constants.
-        if ((not in_str) and (c == '#')):
+        if ((not in_comment) and (not in_str) and (c == '#')):
             in_date = not in_date
 
         # Handle entering/leaving comments.
@@ -462,9 +466,20 @@ def fix_vba_code(vba_code):
     Fix up some substrings that ViperMonkey has problems parsing.
     """
 
+    # Fix dumb typo in some maldocs VBA.
+    vba_code = vba_code.replace("End SubPrivate", "End Sub\nPrivate")
+
+    # We don't handle Line Input constructs for now. Delete them.
+    # TODO: Actually handle Line Input consructs.
+    linputs = re.findall(r"Line\s+Input\s+#\d+\s*,\s*\w+", vba_code, re.DOTALL)
+    if (len(linputs) > 0):
+        log.warning("VB Line Input constructs are not currently handled. Stripping them from code...")
+    for linput in linputs:
+        vba_code = vba_code.replace(linput, "")
+    
     # We don't handle Property constructs for now. Delete them.
     # TODO: Actually handle Property consructs.
-    props = re.findall(r"(?:Public\s+|Private\s+)?Property\s+.+?End\s+Property", vba_code, re.DOTALL)
+    props = re.findall(r"(?:Public\s+|Private\s+|Friend\s+)?Property\s+.+?End\s+Property", vba_code, re.DOTALL)
     if (len(props) > 0):
         log.warning("VB Property constructs are not currently handled. Stripping them from code...")
     for prop in props:
@@ -588,6 +603,7 @@ def strip_useless_code(vba_code, local_funcs):
     """
 
     # Preprocess the code to make it easier to parse.
+    log.info("Modifying VB code...")
     vba_code = fix_vba_code(vba_code)
     
     # Track data change callback function names.

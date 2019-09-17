@@ -44,7 +44,8 @@ import sys
 
 import olefile
 
-from core.logger import log
+from logger import log
+import filetype
 
 def _read_form_strings(vba):
     """
@@ -313,14 +314,14 @@ def _get_shapes_text_values_2007(fname):
         # Pull out the text associated with the object.
         anchor = None
         pad = 0
-        if ("\x1a\x00\x00\x00\x23" in data):
-            anchor = "\x1a\x00\x00\x00\x23"
+        if (b"\x1a\x00\x00\x00\x23" in data):
+            anchor = b"\x1a\x00\x00\x00\x23"
             pad = 3
-        elif ("\x05\x00\x00\x00\x01\x00\x00\x80" in data):
-            anchor = "\x05\x00\x00\x00\x01\x00\x00\x80"
+        elif (b"\x05\x00\x00\x00\x01\x00\x00\x80" in data):
+            anchor = b"\x05\x00\x00\x00\x01\x00\x00\x80"
             pad = 16
-        elif ("\x30\x01\x00\x00" in data):
-            anchor = "\x30\x01\x00\x00"
+        elif (b"\x30\x01\x00\x00" in data):
+            anchor = b"\x30\x01\x00\x00"
         if (anchor is None):
             continue
         start = data.rindex(anchor) + len(anchor) + pad
@@ -338,9 +339,14 @@ def _get_shapes_text_values_2007(fname):
             # Try version 2.
             size_pat = r"\x48\x80\x2c(.{2})"
             tmp = re.findall(size_pat, data)
+        if (len(tmp) == 0):
+            # Try version 3.
+            size_pat = r"\x00\x01\x00\x00\x80(.{2})"
+            tmp = re.findall(size_pat, data)
         if (len(tmp) > 0):
             size_bytes = tmp[0]
             size = ord(size_bytes[1]) * 256 + ord(size_bytes[0])
+            #print "size: " + str(size)
             if (len(text) > size):
                 text = text[:size]
         
@@ -359,6 +365,7 @@ def _get_shapes_text_values_2007(fname):
     unzipped_data.close()
     if (delete_file):
         os.remove(fname)
+    #sys.exit(0)
     return r
 
 def _get_shapes_text_values(fname, stream):
@@ -447,6 +454,28 @@ def _get_shapes_text_values(fname, stream):
             r = _get_shapes_text_values_xml(fname)
 
     return r
+
+def pull_urls_office97(fname, is_data):
+    """
+    Pull URLs directly from an Office97 file.
+    """
+
+    # Is this an Office97 file?
+    if (not filetype.is_office97_file(fname, is_data)):
+        return []
+    
+    # Read in the Office97 file.
+    data = None
+    if (not is_data):
+        with open(fname, 'rb') as f:
+            data = f.read()
+    else:
+        data = fname
+
+    # Pull URLs.
+    URL_REGEX = r'(http[s]?://(?:(?:[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-\.]+(?::[0-9]+)?)+(?:/[/\?&\~=a-zA-Z0-9_\-\.]+)))'
+    pat = r"(/[/\?&\~=a-zA-Z0-9_\-\.]+)"
+    return re.findall(URL_REGEX, data)
 
 ###########################################################################
 ## Main Program
