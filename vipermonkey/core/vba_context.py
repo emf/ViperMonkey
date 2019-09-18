@@ -3745,6 +3745,7 @@ class Context(object):
 
         # Strip out bad characters if needed.
         if (strip_null_bytes):
+
             from vba_object import strip_nonvb_chars
 
             action = strip_nonvb_chars(action)

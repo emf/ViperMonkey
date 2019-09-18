@@ -504,12 +504,6 @@ def eval_arg(arg, context, treat_as_var_name=False):
                     log.debug("BuiltInDocumentProperties: return %r -> %r" % (prop, r))
                     return r
 
-                # Are we referring to a form tag element?
-                # fix this later! treating all .tag entries as zero-length strings
-                elif (".tag" in tmp):
-                    val = ""
-                    return val
-
                 # Are we trying to load some document data?
                 if ((tmp.startswith("thisdocument.builtindocumentproperties(")) or
                     (tmp.startswith("activeworkbook.builtindocumentproperties("))):
@@ -585,12 +579,13 @@ def eval_arg(arg, context, treat_as_var_name=False):
         # Are we referring to a form element that we cannot find?
         if ((str(arg).lower().endswith(".tag")) or
             (str(arg).lower().endswith(".boundvalue")) or
+            (str(arg).lower().endswith(".column")) or
             (str(arg).lower().endswith(".caption")) or
             (str(arg).lower().endswith(".groupname")) or
             (str(arg).lower().endswith(".seltext")) or
+            (str(arg).lower().endswith(".controltiptext")) or
             (str(arg).lower().endswith(".passwordchar")) or
             (str(arg).lower().endswith(".controlsource")) or
-            (str(arg).lower().endswith(".controltiptext")) or
             (str(arg).lower().endswith(".value"))):
             return ""
         
