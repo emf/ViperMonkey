@@ -47,6 +47,394 @@ import olefile
 from logger import log
 import filetype
 
+def get_ole_textbox_values(obj, vba_code):
+    """
+    Read in the text associated with embedded OLE form textbox objects.
+    NOTE: This currently is a NASTY hack.
+    """
+
+    # Set to True to print lots of debugging.
+    #debug = True
+    debug = False
+
+    # Pull out the names of forms the VBA is accessing. We will use that later to try to
+    # guess the names of ActiveX forms parsed from the raw Office file.
+    object_names = set(re.findall(r"(?:ThisDocument|ActiveDocument)\.(\w+)", vba_code))
+    if debug:
+        print "Names from VBA code:"
+        print object_names
+    
+    # Figure out if we have been given already read in data or a file name.
+    if obj[0:4] == '\xd0\xcf\x11\xe0':
+        #its the data blob
+        data = obj
+    else:
+        fname = obj
+        try:
+            f = open(fname, "rb")
+            data = f.read()
+            f.close()
+        except:
+            data = obj
+
+    # Sanity check.
+    if (data is None):
+        if debug:
+            print "NO DATA" 
+        return []
+
+    # Set the general markr for Form data chunks and fields in the Form chunks.
+    form_str = "Microsoft Forms 2.0 "
+    field_marker = "Forms."
+    if (form_str not in data):
+        if debug:
+            print "NO FORMS"
+        return []
+
+    pat = r"(?:[\x20-\x7e]{5,})|(?:(?:(?:\x00|\xff)[\x20-\x7e]){5,})"
+    index = 0
+    r = []
+    found_names = set()
+    while (form_str in data[index:]):
+
+        # Break out the data for an embedded OLE textbox form.
+
+        # Move to the end of specific versions of the form string.
+        # "Microsoft Forms 2.0 TextBox", "Microsoft Forms 2.0 ComboBox", etc.
+        index = data[index:].index(form_str) + index
+        start = index + len(form_str)
+        while ((start < len(data)) and (ord(data[start]) in range(32, 127))):
+            start += 1
+
+        # More textbox forms?
+        if (form_str in data[start:]):
+
+            # Just look at the current form chunk.
+            end = data[start:].index(form_str) + start
+
+        # No more textbox forms.
+        else:
+
+            # Jump an arbitrary amount ahead.
+            end = index + 5000
+            if (end > len(data)):
+                end = len(data) - 1
+
+        # Pull out the current form data chunk.
+        chunk = data[index : end]
+        strs = re.findall(pat, chunk)
+        if debug:
+            print "\n\n-----------------------------"
+            print chunk
+            print str(strs).replace("\\x00", "").replace("\\xff", "")
+
+        # Easy case first. Does this look like it might be 1 of the objects
+        # referenced in the VBA code?
+        curr_pos = 0
+        name_pos = 0
+        name = None
+        for field in strs:
+            poss_name = field.replace("\x00", "").replace("\xff", "").strip()
+            if ((poss_name in object_names) and (poss_name not in found_names)):
+
+                # Looks like this is one of the objects we are looking for.
+                name = poss_name
+                found_names.add(name)
+                name_pos = curr_pos
+                if debug:
+                    print "Found referenced name: " + name
+                break
+            curr_pos += 1
+
+        # Did we find the name?
+        if (name is None):
+            
+            # Pull out the variable name (and maybe part of the text).
+            curr_pos = 0
+            for field in strs:
+    
+                # It might come after the 'Forms.TextBox.1' tag.
+                if (field.startswith(field_marker)):
+    
+                    # If the next field does not look something like '_1619423091' the
+                    # next field is the name. CompObj does not count either.
+                    poss_name = strs[curr_pos + 1].replace("\x00", "").replace("\xff", "").strip()
+                    if (((not poss_name.startswith("_")) or
+                         (not poss_name[1:].isdigit())) and
+                        (poss_name != "CompObj") and
+                        (poss_name != "ObjInfo") and
+                        (poss_name != "contents")):
+    
+                        # We have found the name.
+                        name = poss_name
+                        found_names.add(name)
+                        name_pos = curr_pos + 1
+    
+                    # Seems like there is only 1 'Forms.TextBox.1', so we are
+                    # done with this loop.
+                    break
+
+                # Move to the next field.
+                curr_pos += 1
+
+        # Did we find the name?
+        if (name is None):
+
+            # No. The name comes after an 'OCXNAME' or 'OCXPROPS' field. Figure out
+            # which one.
+            name_marker = "OCXNAME"
+            for field in strs:
+                if (field.replace("\x00", "") == 'OCXPROPS'):
+                    name_marker = "OCXPROPS"
+
+            # Now look for the name after the name marker.
+            curr_pos = 0
+            if debug:
+                print "Name Marker: " + name_marker
+            for field in strs:
+
+                # It might come after the name marker tag.
+                if debug:
+                    print "Field: '" + field.replace("\x00", "") + "'"
+                if (field.replace("\x00", "") == name_marker):
+
+                    # If the next field does not look something like '_1619423091' the
+                    # next field might be the name.
+                    poss_name = strs[curr_pos + 1].replace("\x00", "")
+                    if debug:
+                        print "Try: '" + poss_name + "'"
+                    if ((not poss_name.startswith("_")) or
+                        (not poss_name[1:].isdigit())):
+
+                        # If the string after 'OCXNAME' is 'contents' the actual name comes
+                        # after 'contents'
+                        name_pos = curr_pos + 1
+                        if (poss_name == 'contents'):
+                            poss_name = strs[curr_pos + 2].replace("\x00", "")
+                            if debug:
+                                print "Try: '" + poss_name + "'"
+                            
+                            # Does the next field does not look something like '_1619423091'?
+                            if ((not poss_name.startswith("_")) or
+                                (not poss_name[1:].isdigit())):
+
+                                # We have found the name.
+                                name = poss_name
+                                found_names.add(name)
+                                name_pos = curr_pos + 2
+                                break
+
+                            # Try the next field.
+                            else:
+                                if ((curr_pos + 3) < len(strs)):                                    
+                                    poss_name = strs[curr_pos + 3].replace("\x00", "")
+                                    if debug:
+                                        print "Try: '" + poss_name + "'"
+
+                                    # CompObj is not an object name.
+                                    if (poss_name != "CompObj"):
+                                        name = poss_name
+                                        found_names.add(name)
+                                        name_pos = curr_pos + 3
+                                        break
+
+                                    # And try the next field.
+                                    else:
+
+                                        if ((curr_pos + 4) < len(strs)):
+                                            poss_name = strs[curr_pos + 4].replace("\x00", "")
+                                            if debug:
+                                                print "Try: '" + poss_name + "'"
+
+                                            # ObjInfo is not an object name.
+                                            if (poss_name != "ObjInfo"):
+                                                name = poss_name
+                                                found_names.add(name)
+                                                name_pos = curr_pos + 4
+                                                break
+
+                                            # Heaven help us all. Try the next one.
+                                            if ((curr_pos + 5) < len(strs)):
+                                                poss_name = strs[curr_pos + 5].replace("\x00", "")
+                                                if debug:
+                                                    print "Try: '" + poss_name + "'"
+
+                                                # ObjInfo is not an object name.
+                                                if (poss_name != "ObjInfo"):
+                                                    name = poss_name
+                                                    found_names.add(name)
+                                                    name_pos = curr_pos + 5
+                                                    break
+
+                        else:
+
+                            # We have found the name.
+                            name = poss_name
+                            found_names.add(name)
+                            break
+
+                # Move to the next field.
+                curr_pos += 1
+
+        # Move to the next chunk if we cannot find a name.
+        if (name is None):
+            index = end
+            continue
+
+        # Get a text value after the name if it looks like the following field
+        # is not a font.
+        if debug:
+            print "Possible Name: '" + name + "'"
+        text = ""
+        # This is not working.
+        #if ((name_pos + 1 < len(strs)) and
+        #    ("Calibr" not in strs[name_pos + 1]) and
+        #    ("OCXNAME" not in strs[name_pos + 1].replace("\x00", ""))):
+        #    print "Value: 1"
+        #    text = strs[name_pos + 1]
+
+        # Break out the (possible additional) value.
+        val_pat = r"(?:\x00|\xff)[\x20-\x7e]+[^\x00]*\x00+\x02\x18"
+        vals = re.findall(val_pat, chunk)
+        if (len(vals) > 0):
+            empty_pat = r"(?:\x00|\xff)#[^\x00]*\x00+\x02\x18"
+            if (len(re.findall(empty_pat, vals[0])) == 0):
+                poss_val = re.findall(r"[\x20-\x7e]+", vals[0][1:-2])[0]
+                if (poss_val != text):
+                    text += poss_val.replace("\x00", "")
+        #val_pat = r"\x00#\x00\x00\x00[^\x00]+\x00\x02"
+        val_pat = r"\x00#\x00\x00\x00[^\x02]+\x02"
+        vals = re.findall(val_pat, chunk)
+        if (len(vals) > 0):
+            tmp_text = re.findall(r"[\x20-\x7e]+", vals[0][2:-2])
+            if (len(tmp_text) > 0):
+                poss_val = tmp_text[0]
+                if (poss_val != text):
+                    if debug:
+                        print "Value: 3"
+                        print poss_val
+                    text += poss_val
+
+        # Pull out the size of the text.
+        # Try version 1.
+        size_pat = r"\x48\x80\x2c\x03\x01\x02\x00(.{2})"
+        tmp = re.findall(size_pat, chunk)
+        if (len(tmp) == 0):
+            # Try version 2.
+            size_pat = r"\x48\x80\x2c(.{2})"
+            tmp = re.findall(size_pat, chunk)
+        if (len(tmp) > 0):
+            size_bytes = tmp[0]
+            size = ord(size_bytes[1]) * 256 + ord(size_bytes[0])
+            if debug:
+                print "ORIG:"
+                print name
+                print text
+                print len(text)
+                print size
+            if (len(text) > size):
+                text = text[:size]
+
+        # Save the form name and text value.
+        r.append((name, text))
+
+        # Move to next chunk.
+        index = end
+
+    # The results are approximate. Fix some obvious errors.
+
+    # Fix variable names that are the same as previously seen variable values.
+    last_val = None
+    tmp = []
+    for dat in r:
+
+        # Skip this var/value pair if the current variable name is the same as
+        # the previous variable value.
+        if (dat[0].strip() != last_val):
+            tmp.append(dat)
+        else:
+            if debug:
+                print "Skip 1: " + str(dat)
+            pass
+        last_val = dat[1].strip()
+    r = tmp
+
+    if debug:
+        print "First result:"
+        print r
+    
+    # Fix data that is showing up as a variable name.
+    tmp = []
+    last_var = None
+    last_val = None
+    for dat in r:
+
+        # Does the current variable name look like it is probably data?
+        if (len(dat[0]) > 50):
+
+            # Try this out as the data for the previous variable.
+            last_val = dat[0]
+
+        # Add the previous variable to the results.
+        if (last_var is not None):
+            tmp.append((last_var, last_val))
+
+        # Save the current variable and value.
+        last_var = dat[0]
+        last_val = dat[1]
+
+    # Add in the final result.
+    if ((last_var is not None) and (len(last_var) < 50)):
+        tmp.append((last_var, last_val))
+    r = tmp
+
+    # Fix objects that have no values. This assumes they get the value of an object
+    # that follows them.
+    tmp = []
+    pos = -1
+    last_val = ""
+    if debug:
+        print "&&&&&&&&&&&&"
+    for dat in r:
+
+        # Does the current variable have no value?
+        pos += 1
+        curr_var = dat[0]
+        curr_val = dat[1]        
+        if debug:
+            print curr_var
+            print pos
+            print len(curr_val)
+        if ((curr_val is None) or (len(curr_val) == 0)):
+            
+            # Set the current variable to the value of the next variable with a long value and
+            # hope for the best.
+            replaced = False
+            for i in range(pos + 1, len(r)):
+                if (len(r[i][1]) > 15):
+                    if debug:
+                        print "REPLACE (1)"
+                    curr_val = r[i][1]
+                    break
+
+            # If we found nothing going forward, try the previous value?
+            if ((not replaced) and (len(last_val) > 15)):
+                if debug:
+                    print "REPLACE (2)"
+                curr_val = last_val
+
+        # Update the result list.
+        tmp.append((curr_var, curr_val))
+        last_val = curr_val
+    r = tmp
+    
+    # Return the OLE form textbox information.
+    if debug:
+        print "" 
+        print r
+        sys.exit(0)
+    return r
+
 def _read_form_strings(vba):
     """
     Read in the form strings in order as a lists of tuples like (stream name, form string).
