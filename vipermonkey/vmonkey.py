@@ -984,6 +984,23 @@ def _remove_duplicate_iocs(iocs):
     # Return stripped IOC set.
     return r
 
+def _get_vba_parser(data):
+
+    # First just try the most commin case where olevba can directly get the VBA.
+    vba = None
+    try:
+        vba = VBA_Parser('', data, relaxed=True)
+    except:
+
+        # If that did not work see if we can pull HTA wrapped VB from the data.
+        extracted_data = get_vb_contents(data)
+
+        # If this throws an exception it will get passed up.
+        vba = VBA_Parser('', extracted_data, relaxed=True)
+
+    # Return the vba parser.
+    return vba
+
 # Wrapper for original function; from here out, only data is a valid variable.
 # filename gets passed in _temporarily_ to support dumping to vba_context.out_dir = out_dir.
 def _process_file (filename,
@@ -1023,7 +1040,7 @@ def _process_file (filename,
         #TODO: handle olefile errors, when an OLE file is malformed
         if (isinstance(data, Exception)):
             data = None
-        vba = VBA_Parser('', data, relaxed=True)
+        vba = _get_vba_parser(data)
         if vba.detect_vba_macros():
 
             # Read in document metadata.
