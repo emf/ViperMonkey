@@ -61,7 +61,7 @@ def get_ole_textbox_values(obj, vba_code):
     
     # Pull out the names of forms the VBA is accessing. We will use that later to try to
     # guess the names of ActiveX forms parsed from the raw Office file.
-    object_names = set(re.findall(r"(?:ThisDocument|ActiveDocument)\.(\w+)", vba_code))
+    object_names = set(re.findall(r"(?:ThisDocument|ActiveDocument|\w+)\.(\w+)", vba_code))
     if debug:
         print "Names from VBA code:"
         print object_names
@@ -86,7 +86,10 @@ def get_ole_textbox_values(obj, vba_code):
             sys.exit(0)
         return []
 
-    # Set the general markr for Form data chunks and fields in the Form chunks.
+    # Make sure some special fields are seperated.
+    data = data.replace("c\x00o\x00n\x00t\x00e\x00n\x00t\x00s", "\x00c\x00o\x00n\x00t\x00e\x00n\x00t\x00s\x00")
+    
+    # Set the general marker for Form data chunks and fields in the Form chunks.
     form_str = "Microsoft Forms 2.0"
     field_marker = "Forms."
     if (form_str not in data):
@@ -99,6 +102,7 @@ def get_ole_textbox_values(obj, vba_code):
     index = 0
     r = []
     found_names = set()
+    long_strs = []
     while (form_str in data[index:]):
 
         # Break out the data for an embedded OLE textbox form.
@@ -290,7 +294,7 @@ def get_ole_textbox_values(obj, vba_code):
         if debug:
             print "Possible Name: '" + name + "'"
         text = ""
-        # This is not working.
+        # This is not working quite right.
         if ((name_pos + 1 < len(strs)) and
             ("Calibr" not in strs[name_pos + 1]) and
             ("OCXNAME" not in strs[name_pos + 1].replace("\x00", "")) and
@@ -313,7 +317,8 @@ def get_ole_textbox_values(obj, vba_code):
                 poss_val = re.findall(r"[\x20-\x7e]+", vals[0][1:-2])[0]
                 if (poss_val != text):
                     text += poss_val.replace("\x00", "")
-        #val_pat = r"\x00#\x00\x00\x00[^\x00]+\x00\x02"
+
+        # Pattern 2                    
         val_pat = r"\x00#\x00\x00\x00[^\x02]+\x02"
         vals = re.findall(val_pat, chunk)
         if (len(vals) > 0):
@@ -326,6 +331,20 @@ def get_ole_textbox_values(obj, vba_code):
                         print poss_val
                     text += poss_val
 
+        # Pattern 3
+        val_pat = r"([\x20-\x7e]{5,})\x00\x02\x0c\x00\x34"
+        vals = re.findall(val_pat, chunk)
+        if (len(vals) > 0):
+            for v in vals:
+                text += v
+
+        # Pattern 4
+        val_pat = r"([\x20-\x7e]{5,})\x00\x00\x00\x00\x02\x0c"
+        vals = re.findall(val_pat, chunk)
+        if (len(vals) > 0):
+            for v in vals:
+                text += v
+                
         # Pull out the size of the text.
         # Try version 1.
         size_pat = r"\x48\x80\x2c\x03\x01\x02\x00(.{2})"
@@ -348,6 +367,13 @@ def get_ole_textbox_values(obj, vba_code):
 
         # Save the form name and text value.
         r.append((name, text))
+
+        # Save long strings. Maybe they are the value of a previous variable?
+        longest_str = ""
+        for field in strs:
+            if ((len(field) > 30) and (len(field) > len(longest_str))):
+                longest_str = field
+        long_strs.append(longest_str)
 
         # Move to next chunk.
         index = end
@@ -406,6 +432,7 @@ def get_ole_textbox_values(obj, vba_code):
     last_val = ""
     if debug:
         print "&&&&&&&&&&&&"
+        print long_strs
     for dat in r:
 
         # Does the current variable have no value?
@@ -422,10 +449,16 @@ def get_ole_textbox_values(obj, vba_code):
             # hope for the best.
             replaced = False
             for i in range(pos + 1, len(r)):
-                if (len(r[i][1]) > 15):
+                poss_val1 = r[i][1]
+                poss_val2 = long_strs[i]
+                poss_val = poss_val2
+                if (len(poss_val1) > len(poss_val2)):
+                    poss_val = poss_val1
+                if (len(poss_val) > 15):
                     if debug:
                         print "REPLACE (1)"
-                    curr_val = r[i][1]
+                    curr_val = poss_val
+                    replaced = True
                     break
 
             # If we found nothing going forward, try the previous value?
