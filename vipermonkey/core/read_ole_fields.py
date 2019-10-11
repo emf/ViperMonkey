@@ -53,19 +53,6 @@ def get_ole_textbox_values(obj, vba_code):
     NOTE: This currently is a NASTY hack.
     """
 
-    # Set to True to print lots of debugging.
-    #debug = True
-    debug = False
-    if debug:
-        print "Extracting OLE/ActiveX TextBox strings..."
-    
-    # Pull out the names of forms the VBA is accessing. We will use that later to try to
-    # guess the names of ActiveX forms parsed from the raw Office file.
-    object_names = set(re.findall(r"(?:ThisDocument|ActiveDocument|\w+)\.(\w+)", vba_code))
-    if debug:
-        print "Names from VBA code:"
-        print object_names
-    
     # Figure out if we have been given already read in data or a file name.
     if obj[0:4] == '\xd0\xcf\x11\xe0':
         #its the data blob
@@ -79,6 +66,23 @@ def get_ole_textbox_values(obj, vba_code):
         except:
             data = obj
 
+    # Is this an Office97 file?
+    if (not filetype.is_office97_file(data, True)):
+        return []
+    
+    # Set to True to print lots of debugging.
+    #debug = True
+    debug = False
+    if debug:
+        print "Extracting OLE/ActiveX TextBox strings..."
+    
+    # Pull out the names of forms the VBA is accessing. We will use that later to try to
+    # guess the names of ActiveX forms parsed from the raw Office file.
+    object_names = set(re.findall(r"(?:ThisDocument|ActiveDocument|\w+)\.(\w+)", vba_code))
+    if debug:
+        print "Names from VBA code:"
+        print object_names
+            
     # Sanity check.
     if (data is None):
         if debug:
@@ -88,6 +92,7 @@ def get_ole_textbox_values(obj, vba_code):
 
     # Make sure some special fields are seperated.
     data = data.replace("c\x00o\x00n\x00t\x00e\x00n\x00t\x00s", "\x00c\x00o\x00n\x00t\x00e\x00n\x00t\x00s\x00")
+    data = re.sub("(_(?:\x00\d){10})", "\x00" + r"\1", data)
     
     # Set the general marker for Form data chunks and fields in the Form chunks.
     form_str = "Microsoft Forms 2.0"
@@ -124,7 +129,7 @@ def get_ole_textbox_values(obj, vba_code):
         else:
 
             # Jump an arbitrary amount ahead.
-            end = index + 5000
+            end = index + 25000
             if (end > len(data)):
                 end = len(data) - 1
 
@@ -166,8 +171,11 @@ def get_ole_textbox_values(obj, vba_code):
     
                     # If the next field does not look something like '_1619423091' the
                     # next field is the name. CompObj does not count either.
-                    poss_name = strs[curr_pos + 1].replace("\x00", "").replace("\xff", "").strip()
-                    if (((not poss_name.startswith("_")) or
+                    poss_name = None
+                    if ((curr_pos + 1) < len(strs)):
+                        poss_name = strs[curr_pos + 1].replace("\x00", "").replace("\xff", "").strip()
+                    if ((poss_name is not None) and
+                        ((not poss_name.startswith("_")) or
                          (not poss_name[1:].isdigit())) and
                         (poss_name != "CompObj") and
                         (poss_name != "ObjInfo") and
@@ -295,15 +303,20 @@ def get_ole_textbox_values(obj, vba_code):
             print "Possible Name: '" + name + "'"
         text = ""
         # This is not working quite right.
-        if ((name_pos + 1 < len(strs)) and
-            ("Calibr" not in strs[name_pos + 1]) and
-            ("OCXNAME" not in strs[name_pos + 1].replace("\x00", "")) and
-            ("contents" != strs[name_pos + 1].replace("\x00", "").strip()) and
-            ("ObjInfo" != strs[name_pos + 1].replace("\x00", "").strip()) and
-            ("CompObj" != strs[name_pos + 1].replace("\x00", "").strip())):
+        asc_str = None
+        if (name_pos + 1 < len(strs)):
+            asc_str = strs[name_pos + 1].replace("\x00", "").strip()
+        if ((asc_str is not None) and
+            ("Calibr" not in asc_str) and
+            ("OCXNAME" not in asc_str) and
+            ("contents" != asc_str) and
+            ("ObjInfo" != asc_str) and
+            ("CompObj" != asc_str) and
+            (re.match(r"_\d{10}", asc_str) is None)):
             if debug:
                 print "Value: 1"
-
+                print strs[name_pos + 1]
+                
             # Only used with large text values?
             if (len(strs[name_pos + 1]) > 20):
                 text = strs[name_pos + 1]
@@ -339,11 +352,17 @@ def get_ole_textbox_values(obj, vba_code):
                 text += v
 
         # Pattern 4
-        val_pat = r"([\x20-\x7e]{5,})\x00\x00\x00\x00\x02\x0c"
+        val_pat = r"([\x20-\x7e]{5,})\x00{2,4}\x02\x0c"
         vals = re.findall(val_pat, chunk)
         if (len(vals) > 0):
             for v in vals:
                 text += v
+                
+        # Maybe big chunks of text after the name are part of the value?
+        for pos in range(name_pos + 2, len(strs)):
+            curr_str = strs[pos].replace("\x00", "")
+            if (len(curr_str) > 40):
+                text += curr_str
                 
         # Pull out the size of the text.
         # Try version 1.

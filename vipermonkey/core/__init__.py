@@ -182,7 +182,8 @@ class ViperMonkey(object):
                              'document_close', 'auto_open', 'autoexec',
                              'autoexit', 'document_beforeclose', 'workbook_open',
                              'workbook_activate', 'auto_close', 'workbook_close',
-                             'workbook_deactivate', 'documentopen', 'app_documentopen']
+                             'workbook_deactivate', 'documentopen', 'app_documentopen',
+                             'main']
 
         # List of suffixes of the names of callback functions that provide alternate
         # methods for running things on document (approximately) open.
@@ -468,7 +469,11 @@ class ViperMonkey(object):
         context.globals["['ThisDocument'].Content.Start".lower()] = 0
         context.globals["['ThisDocument'].Content.End".lower()] = len("\n".join(self.doc_text))
         context.globals["['ThisDocument'].Paragraphs".lower()] = self.doc_text
-
+        context.globals["['ActiveDocument'].Characters".lower()] = list("\n".join(self.doc_text))
+        context.globals["ActiveDocument.Characters".lower()] = list("\n".join(self.doc_text))
+        context.globals["['ThisDocument'].Characters".lower()] = list("\n".join(self.doc_text))
+        context.globals["ThisDocument.Characters".lower()] = list("\n".join(self.doc_text))
+        
         # Fake up some comments.
         # TODO: Figure out how to actually read the comments.
         context.globals["ActiveDocument.Comments".lower()] = ["Comment 1", "Comment 2"]

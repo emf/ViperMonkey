@@ -46,6 +46,9 @@ import sys
 import os
 import array
 from hashlib import sha256
+import string
+
+import unidecode
 
 from identifiers import *
 from reserved import *
@@ -66,18 +69,24 @@ from logger import log
 
 file_pointer = Suppress('#') + (decimal_literal | lex_identifier)
 file_pointer.setParseAction(lambda t: "#" + str(t[0]))
+file_pointer_loose = (decimal_literal | lex_identifier)
+file_pointer_loose.setParseAction(lambda t: "#" + str(t[0]))
 
 # --- SIMPLE NAME EXPRESSION -------------------------------------------------
 
+missed_var_count = {}
 class SimpleNameExpression(VBA_Object):
     """
     Identifier referring to a variable within a VBA expression:
     single identifier with no qualification or argument list
     """
 
-    def __init__(self, original_str, location, tokens):
+    def __init__(self, original_str, location, tokens, name=None):
         super(SimpleNameExpression, self).__init__(original_str, location, tokens)
-        self.name = tokens.name
+        if (name is not None):
+            self.name = name
+        else:
+            self.name = tokens.name
         log.debug('parsed "%r" as SimpleNameExpression' % self)
 
     def __repr__(self):
@@ -106,7 +115,16 @@ class SimpleNameExpression(VBA_Object):
                 log.debug('evaluated function %r = %r' % (self.name, value))
             return value
         except KeyError:
-            log.warning('Variable %r not found' % self.name)
+
+            # Track the # of times we have failed to look up this variable. Stop reporting
+            # if there are many failed lookups.
+            var_name = str(self.name)
+            global missed_var_count
+            if (var_name not in missed_var_count.keys()):
+                missed_var_count[var_name] = 0
+            missed_var_count[var_name] += 1
+            if (missed_var_count[var_name] < 20):
+                log.warning('Variable %r not found' % self.name)
             if (self.name.startswith("%") and self.name.endswith("%")):
                 return self.name.upper()
             return "NULL"
@@ -734,6 +752,7 @@ class MemberAccessExpression(VBA_Object):
         if ("\\" in filename):
             filename = filename[filename.rindex("\\") + 1:]
         fname = out_dir + "/" + filename
+        fname = fname.replace("\x00", "")
         try:
 
             # Write out the file.
@@ -939,6 +958,16 @@ class MemberAccessExpression(VBA_Object):
             # is the With context item.
             tmp_lhs = eval_arg(context.with_prefix, context)
 
+        # Is the LHS a python dict and are we looking for a field?
+        if (isinstance(tmp_lhs, dict)):
+
+            # Do we have the needed field?
+            key = str(self.rhs).replace("[", "").replace("]", "").replace("'", "")
+            if (key in tmp_lhs.keys()):
+
+                # Return the field value.
+                return tmp_lhs[key]
+            
         # Handle getting the .Count of a data collection..
         call_retval = self._handle_count(context, tmp_lhs)
         if (call_retval is not None):
@@ -1042,7 +1071,8 @@ class MemberAccessExpression(VBA_Object):
             if ((isinstance(tmp_lhs, str)) and
                 (tmp_lhs != "NULL") and
                 (not "Shapes(" in tmp_lhs) and
-                (not "Close" in str(self.rhs))):
+                (not "Close" in str(self.rhs)) and
+                (not context.contains(self.lhs))):
 
                 # Just work with the returned string value.
                 return tmp_lhs
@@ -1078,7 +1108,7 @@ class MemberAccessExpression(VBA_Object):
             # Do we know what the RHS variable evaluates to?
             tmp_rhs = eval_arg(rhs, context)
             if ((tmp_rhs != rhs) and
-                (tmp_lhs == "NULL") and
+                ((tmp_lhs == "NULL") or (str(tmp_lhs).lower().endswith(".application"))) and
                 (tmp_rhs != "NULL") and
                 ("vipermonkey.core.vba_library" not in str(type(tmp_rhs)))):
                 log.debug("Resolved member access variable.")
@@ -1330,9 +1360,13 @@ class Function_Call(VBA_Object):
         if (context.have_error()):
             log.warn('Short circuiting function call %s(%s) due to thrown VB error.' % (self.name, str_params))
             return None
+
+        # We will not report the calls of some functions.
+        skip_report_functions = set(["cos", "tan"])
+        if (str(self.name).lower() not in skip_report_functions):
+            log.info('calling Function: %s(%s)' % (self.name, str_params))
         
         # Actually emulate the function call.
-        log.info('calling Function: %s(%s)' % (self.name, str_params))
         if (is_external):
             context.report_action("External Call", self.name + "(" + str(params) + ")", self.name, strip_null_bytes=True)
         if self.name.lower() in context._log_funcs \
@@ -1485,10 +1519,28 @@ expr_list_item = Optional(Suppress(CaselessKeyword("ByVal") | CaselessKeyword("B
 # NOTE: This helps to speed up parsing and prevent recursion loops.
 expr_list_item = (expr_item + FollowedBy(',')) | expr_list_item
 
+def quick_parse_int_or_var(text):
+    text = str(text).strip()
+    #print "item: '" + text + "'"
+
+    # Integer?
+    if (text.isdigit()):
+        return int(text)        
+
+    # Variable?
+    if (re.match(r"[_a-zA-Z][_a-zA-Z\d]*", text) is not None):
+        r = SimpleNameExpression(None, None, None, text)
+        #print r
+        return r
+
+    # Non-special case. Parse it.
+    r = expression.parseString(text, parseAll=True)[0]
+    return r
+    
 # Parse large array expressions quickly with a regex.
 # language=PythonRegExp
 expr_list_fast = Regex("(?:\s*[0-9a-zA-Z_]+\s*,\s*){10,}\s*[0-9a-zA-Z_]+\s*")
-expr_list_fast.setParseAction(lambda t: [expression.parseString(i, parseAll=True)[0] for i in t[0].split(",")])
+expr_list_fast.setParseAction(lambda t: [quick_parse_int_or_var(i) for i in t[0].split(",")])
 
 # Parse general expression lists more completely but more slowly.
 expr_list_slow = delimitedList(Optional(expr_list_item, default=""))
@@ -1604,6 +1656,7 @@ func_call_array_access_limited.setParseAction(Function_Call_Array_Access)
 # - finally literals (strings, integers, etc)
 
 typeof_expression = Forward()
+addressof_expression = Forward()
 expr_item <<= (
     Optional(CaselessKeyword("ByVal").suppress())
     + (
@@ -1618,6 +1671,7 @@ expr_item <<= (
         | file_pointer
         | placeholder
         | typeof_expression
+        | addressof_expression
     )
 )
 
@@ -1785,6 +1839,12 @@ class BoolExprItem(VBA_Object):
             rhs = rhs + 0.0
         if (isinstance(rhs, float) and isinstance(lhs, int)):
             lhs = lhs + 0.0
+
+        # Convert unicode to str by stripping non-ASCII chars. Not ideal.
+        if (isinstance(lhs, unicode)):
+            lhs = ''.join(filter(lambda x:x in string.printable, lhs))
+        if (isinstance(rhs, unicode)):
+            rhs = ''.join(filter(lambda x:x in string.printable, rhs))
             
         # Handle unexpected types.
         if (((not isinstance(rhs, int)) and (not isinstance(rhs, str)) and (not isinstance(rhs, float))) or
@@ -1793,16 +1853,18 @@ class BoolExprItem(VBA_Object):
             # Punt and compare everything as strings.
             lhs = str(lhs)
             rhs = str(rhs)
-            
+
+        # Always evaluate to true if comparing against a wildcard.
+        rhs = strip_nonvb_chars(rhs)
+        lhs = strip_nonvb_chars(lhs)
+        rhs_str = str(rhs)
+        lhs_str = str(lhs)
+        if (("**MATCH ANY**" in lhs_str) or ("**MATCH ANY**" in rhs_str)):
+            return True
+        
         # Evaluate the expression.
         if ((self.op.lower() == "=") or
             (self.op.lower() == "is")):
-            rhs = strip_nonvb_chars(rhs)
-            lhs = strip_nonvb_chars(lhs)
-            rhs_str = str(rhs)
-            lhs_str = str(lhs)
-            if (("**MATCH ANY**" in lhs_str) or ("**MATCH ANY**" in rhs_str)):
-                return True
             return lhs == rhs
         elif (self.op == ">"):
             return lhs > rhs
@@ -2005,8 +2067,26 @@ class TypeOf_Expression(VBA_Object):
         return "TypeOf " + str(self.item) + " Is " + str(self.the_type)
 
     def eval(self, context, params=None):
-        # TODO: Not sure how to handle this. For now just always matchxs.
+        # TODO: Not sure how to handle this. For now just always matches.
         return True
 
 typeof_expression <<= CaselessKeyword("TypeOf") + expression("item") + CaselessKeyword("Is") + expression("the_type")
 typeof_expression.setParseAction(TypeOf_Expression)
+
+# --- ADDRESSOF EXPRESSION --------------------------------------------------------------
+
+class AddressOf_Expression(VBA_Object):
+    def __init__(self, original_str, location, tokens):
+        super(AddressOf_Expression, self).__init__(original_str, location, tokens)
+        self.item = tokens.item
+        log.debug('parsed %r as AddressOf_Expression' % self)
+
+    def __repr__(self):
+        return "AddressOf " + str(self.item)
+
+    def eval(self, context, params=None):
+        # TODO: Not sure how to handle this. For now just always matches anything.
+        return "**MATCH ANY**"
+
+addressof_expression <<= CaselessKeyword("AddressOf") + expression("item")
+addressof_expression.setParseAction(AddressOf_Expression)

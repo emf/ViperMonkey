@@ -203,7 +203,9 @@ type_expression = lex_identifier + Optional('.' + lex_identifier)
 
 type_declaration_composite = Optional(CaselessKeyword('Public') | CaselessKeyword('Private')) + CaselessKeyword('Type') + \
                              lex_identifier + Suppress(EOS) + \
-                             OneOrMore(lex_identifier + Optional(Suppress(Literal('(') + Optional(expr_list) + Literal(')'))) + \
+                             OneOrMore(lex_identifier + \
+                                       Optional(Suppress(Literal('(') + Optional(expr_list) + Literal(')'))) + \
+                                       Optional(Suppress(Literal('(') + expression + CaselessKeyword("To") + expression + Literal(')'))) + \
                                        CaselessKeyword('As') + reserved_type_identifier + \
                                        Suppress(Optional("*" + (decimal_literal | lex_identifier))) + Suppress(EOS)) + \
                              CaselessKeyword('End') + CaselessKeyword('Type') + \
@@ -548,12 +550,14 @@ class Dim_Statement(VBA_Object):
             # Handle uninitialized global variables.
             if ((context.global_scope) and (curr_init_val is None)):
                 curr_init_val = "NULL"
+
+            # Keep the current variable value if this variable already exists.
+            if (context.contains(var[0])):
+                curr_init_val = context.get(var[0])
                 
-            # Set the initial value of the declared variable. Only do this if the variable
-            # does not already exist.
-            if (not context.contains(var[0])):
-                context.set(var[0], curr_init_val, curr_type, force_global=(self.decl_type.lower() == "const"))
-                log.debug("DIM " + str(var[0]) + " As " + str(curr_type) + " = " + str(curr_init_val))
+            # Set the initial value of the declared variable. And the type.
+            context.set(var[0], curr_init_val, curr_type, force_global=(self.decl_type.lower() == "const"))
+            log.debug("DIM " + str(var[0]) + " As " + str(curr_type) + " = " + str(curr_init_val))
     
 # 5.4.3.1 Local Variable Declarations
 #
@@ -768,7 +772,7 @@ class Let_Statement(VBA_Object):
             return False
 
         # Modifying a substring?
-        if (self.string_op["op"] == "mid"):
+        if ((self.string_op["op"] == "mid") or (self.string_op["op"] == "mid$")):
 
             # Get the string to modify, substring start index, and substring length.
             args = self.string_op["args"]
@@ -1010,7 +1014,7 @@ class Let_Statement(VBA_Object):
                 arr_var = []
 
             # Handle lists
-            if (isinstance(arr_var, list)):
+            if ((isinstance(arr_var, list)) and (index >= 0)):
             
                 # Do we need to extend the length of the list to include the indices?
                 if (index >= len(arr_var)):
@@ -1082,7 +1086,7 @@ class LSet_Statement(Let_Statement):
 # TODO: remove Set when Set_Statement implemented:
 
 # Mid(zLGzE1gWt, MbgQPcQzy, 1)
-string_modification = CaselessKeyword('Mid') + Optional(Suppress('(')) + expr_list('params') + Optional(Suppress(')'))
+string_modification = (CaselessKeyword('Mid') | CaselessKeyword('Mid$')) + Optional(Suppress('(')) + expr_list('params') + Optional(Suppress(')'))
 
 let_statement = (
     Optional(CaselessKeyword('Let') | CaselessKeyword('Set')).suppress()
@@ -3281,7 +3285,7 @@ file_open_statement = (
     + Optional(
         file_type("type")
         + Suppress(CaselessKeyword("As"))
-        + (file_pointer("file_id") | TODO_identifier_or_object_attrib("file_id"))
+        + (file_pointer("file_id") | TODO_identifier_or_object_attrib("file_id") | file_pointer_loose("file_id"))
         + Suppress(Optional(CaselessKeyword("Len") + Literal("=") + expression))
     )
 )

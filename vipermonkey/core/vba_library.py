@@ -42,6 +42,7 @@ __version__ = '0.02'
 # --- IMPORTS ------------------------------------------------------------------
 
 from datetime import datetime
+from datetime import date
 import time
 import array
 import math
@@ -187,13 +188,19 @@ class Format(VbaLibraryFunc):
 
     def eval(self, context, params=None):
 
-        # Fake up a date if needed.
-        # TODO: Currently this fake date is specific to a campaign targeting Italy.
+        # Are we faking a value for this particular format call?
         r = params[0]
         if (len(params) > 1):
             typ = str(params[1])
+
+            # Fake up a date if needed.
+            # TODO: Currently this fake date is specific to a campaign targeting Italy.
             if (typ.lower() == "long date"):
                 r = "gioved\xc3\xac 27 giugno 2019"
+
+            # Let's match any currency checks.
+            if (typ.lower() == "currency"):
+                r = "**MATCH ANY**"
 
         # Done.
         log.debug("Format(%r): return %r" % (self, r))
@@ -1205,7 +1212,9 @@ class StrReverse(VbaLibraryFunc):
         assert len(params) > 0
         # TODO: Actually implement this properly.
         string =''
-        if (params[0] is not None):
+        if ((params[0] is not None) and
+            (not isinstance(params[0], str)) and
+            (not isinstance(params[0], unicode))):
             string = str(params[0])
         r = string[::-1]
         log.debug("StrReverse: return %r" % r)
@@ -1843,7 +1852,7 @@ class Dir(VbaLibraryFunc):
 
     def eval(self, context, params=None):
         assert (len(params) >= 1)
-        pat = params[0]
+        pat = str(params[0])
         attrib = None
         # TODO: Handle multiple attributes.
         if (len(params) > 1):
@@ -2292,7 +2301,8 @@ class IIf(VbaLibraryFunc):
     """
 
     def eval(self, context, params=None):
-        assert (len(params) == 3)
+        if ((params is None) or (len(params) < 3)):
+            return "NULL"
         guard = params[0]
         true_part = params[1]
         false_part = params[2]
@@ -2353,7 +2363,12 @@ class CallByName(VbaLibraryFunc):
         # CallByName(([DoBas, 'Arguments', VbLet, aas], {}))
         if ((cmd == "Arguments") or (cmd == "Path")):
             context.report_action("CallByName", args, 'Possible Scheduled Task Setup', strip_null_bytes=True)
-
+        # CallByName(['shell.application', 'shellexecute', 1, ...
+        if (cmd.lower() == "shellexecute"):
+            if (len(params) > 4):
+                run_cmd = str(params[3]) + " " + str(params[4])
+                context.report_action('Execute Command', run_cmd, 'Shell function', strip_null_bytes=True)
+            
         # Are we using this to read text from a GUI element?
         if ((cmd == "Tag") or (cmd == "Text")):
 
@@ -2737,6 +2752,13 @@ class ExecQuery(VbaLibraryFunc):
         cmd = str(params[0])
         context.report_action("Execute Query", cmd, 'Query', strip_null_bytes=True)
 
+        # Return some data for some queries.
+        if (cmd.lower() == "select * from win32_process"):
+            return [{"name" : "wscript.exe"},
+                    {"name" : "cscript.exe"},
+                    {"name" : "word.exe"},
+                    {"name" : "excel.exe"},]
+        
         # Say it was successful.
         return ["", ""]
         
@@ -3005,7 +3027,16 @@ class Range(VbaLibraryFunc):
             # Failed to read cell.
             log.warning("Failed to read Range(" + str(params[0]) + "). " + str(e))
             return "NULL"
-        
+
+class Date(VbaLibraryFunc):
+    """
+    Date() function. Currently stubbed to just return the current date as 
+    a Python datetime object.
+    """
+
+    def eval(self, context, params=None):
+        return date.today()
+    
 class Year(VbaLibraryFunc):
     """
     Year() function. Currently stubbed.
@@ -3015,7 +3046,7 @@ class Year(VbaLibraryFunc):
         assert (len(params) == 1)
         t = params[0]
         r = 0
-        if (isinstance(t, datetime)):
+        if ((isinstance(t, datetime)) or (isinstance(t, date))):
             r = int(t.year)
         return r
 
@@ -3112,7 +3143,8 @@ class Print(VbaLibraryFunc):
         if (("http:" in data_str) or ("https:" in data_str)):
             context.report_action('Write URL', data_str, 'Debug Print')
 
-        context.report_action("Debug Print", str(params[0]), '')
+        if (params[0] is not None):
+            context.report_action("Debug Print", str(params[0]), '')
 
 class Debug(Print):
     """
@@ -3342,6 +3374,14 @@ class CreateElement(VbaLibraryFunc):
 
         # Assume that this is something like 'CreateObject("Microsoft.XMLDOM").createElement("tmp")'.
         return "Microsoft.XMLDOM"
+
+class Send(VbaLibraryFunc):
+    """
+    Faked emulation of HTTP send(). Always returns 200.
+    """
+
+    def eval(self, context, params=None):
+        return 200
     
 class Write(VbaLibraryFunc):
     """
@@ -3399,7 +3439,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                AddFromString, Not, PrivateProfileString, GetCursorPos, CreateElement,
                IsObject, NumPut, GetLocale, URLDownloadToFile, URLDownloadToFileA,
                URLDownloadToFileW, SaveAs, Quit, Exists, RegRead, Kill, RmDir, EOF,
-               MonthName, GetSpecialFolder, IsEmpty):
+               MonthName, GetSpecialFolder, IsEmpty, Date):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

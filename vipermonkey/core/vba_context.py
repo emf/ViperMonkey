@@ -684,6 +684,10 @@ class Context(object):
         self.globals["Application.MouseAvailable".lower()] = True
         self.globals["Application.PathSeparator".lower()] = "\\"
         self.globals["RecentFiles.Count".lower()] = 4 + random.randint(1, 10)
+        self.globals["ActiveDocument.Revisions.Count".lower()] = 1 + random.randint(1, 3)
+        self.globals["ThisDocument.Revisions.Count".lower()] = 1 + random.randint(1, 3)
+        self.globals["Revisions.Count".lower()] = 1 + random.randint(1, 3)
+        self.globals["ReadyState".lower()] = "**MATCH ANY**"
         
         # List of _all_ Excel constants taken from https://www.autohotkey.com/boards/viewtopic.php?t=60538&p=255925 .
         self.globals["_xlDialogChartSourceData".lower()] = 541
@@ -3230,8 +3234,8 @@ class Context(object):
         if isinstance(data, str):
 
             # Hex string?
-            if re.match('&H[0-9A-F]{2}', data, re.IGNORECASE):
-                data = chr(int(data[-2:], 16))
+            if ((len(data.strip()) == 4) and (re.match('&H[0-9A-F]{2}', data, re.IGNORECASE))):
+                data = chr(int(data.strip()[-2:], 16))
 
             self.open_files[fname] += data
             return True
@@ -3270,7 +3274,7 @@ class Context(object):
         global file_count
         
         # Make sure the "file" exists.
-        fname = fname.replace(".\\", "").replace("\\", "/")
+        fname = str(fname).replace(".\\", "").replace("\\", "/")
         if fname not in self.open_files:
             log.error('File {} not open. Cannot close.'.format(fname))
             return
@@ -3316,6 +3320,7 @@ class Context(object):
         # Dump the file.
         try:
             # Get a unique name for the file.
+            fname = fname.replace("\x00", "")
             file_path = os.path.join(out_dir, os.path.basename(fname))
             orig_file_path = file_path
             count = 0
@@ -3585,7 +3590,10 @@ class Context(object):
         else:
             # new name, typically store in local scope.
             if (not self.global_scope):
-                log.debug("Set local var " + str(name) + " = " + str(value))
+                try:
+                    log.debug("Set local var " + str(name) + " = " + str(value))
+                except:
+                    pass
                 self.locals[name] = value
             else:
                 self.globals[name] = value
