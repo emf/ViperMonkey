@@ -950,7 +950,6 @@ def pull_urls_office97(fname, is_data, vba):
 
     # Skip URLs that appear in comments.
     comment_urls = pull_urls_from_comments(vba)
-    print comment_urls
     file_urls = re.findall(URL_REGEX, data)
     r = set()
     for url in file_urls:
