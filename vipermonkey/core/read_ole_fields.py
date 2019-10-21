@@ -312,6 +312,7 @@ def get_ole_textbox_values(obj, vba_code):
             ("contents" != asc_str) and
             ("ObjInfo" != asc_str) and
             ("CompObj" != asc_str) and
+            (not asc_str.startswith("_DELETED_NAME_")) and
             (re.match(r"_\d{10}", asc_str) is None)):
             if debug:
                 print "Value: 1"
@@ -371,6 +372,10 @@ def get_ole_textbox_values(obj, vba_code):
         if (len(tmp) == 0):
             # Try version 2.
             size_pat = r"\x48\x80\x2c(.{2})"
+            tmp = re.findall(size_pat, chunk)
+        if (len(tmp) == 0):
+            # Try version 3.
+            size_pat = r"\xf8\x00\x28\x00\x00\x00(.{2})"
             tmp = re.findall(size_pat, chunk)
         if (len(tmp) > 0):
             size_bytes = tmp[0]

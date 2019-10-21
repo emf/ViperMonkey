@@ -1212,10 +1212,11 @@ class StrReverse(VbaLibraryFunc):
         assert len(params) > 0
         # TODO: Actually implement this properly.
         string =''
-        if ((params[0] is not None) and
-            (not isinstance(params[0], str)) and
-            (not isinstance(params[0], unicode))):
-            string = str(params[0])
+        if ((params[0] is not None) and (len(params) > 0)):
+            string = params[0]
+            if ((not isinstance(params[0], str)) and
+                (not isinstance(params[0], unicode))):
+                string = str(params[0])
         r = string[::-1]
         log.debug("StrReverse: return %r" % r)
         return r
@@ -3037,6 +3038,15 @@ class Date(VbaLibraryFunc):
 
     def eval(self, context, params=None):
         return date.today()
+
+class DateAdd(VbaLibraryFunc):
+    """
+    DateAdd() function. Currently stubbed to just return the current date as 
+    a Python datetime object.
+    """
+
+    def eval(self, context, params=None):
+        return date.today()
     
 class Year(VbaLibraryFunc):
     """
@@ -3459,7 +3469,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                AddFromString, Not, PrivateProfileString, GetCursorPos, CreateElement,
                IsObject, NumPut, GetLocale, URLDownloadToFile, URLDownloadToFileA,
                URLDownloadToFileW, SaveAs, Quit, Exists, RegRead, Kill, RmDir, EOF,
-               MonthName, GetSpecialFolder, IsEmpty, Date, DeleteFile, MoveFile):
+               MonthName, GetSpecialFolder, IsEmpty, Date, DeleteFile, MoveFile, DateAdd):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

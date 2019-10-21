@@ -187,8 +187,10 @@ def _read_from_excel(arg, context):
     """
 
     # Try handling reading value from an Excel spreadsheet cell.
+    # ThisWorkbook.Sheets('YHRPN').Range('J106').Value
     arg_str = str(arg)
-    if (("sheets(" in arg_str.lower()) and
+    if (("MemberAccessExpression" in str(type(arg))) and
+        ("sheets(" in arg_str.lower()) and
         (("range(" in arg_str.lower()) or ("cells(" in arg_str.lower()))):
         
         log.debug("Try as Excel cell read...")
@@ -215,17 +217,27 @@ def _read_from_excel(arg, context):
             sheet = context.loaded_excel.sheet_by_name(sheet_name)
             
             # Pull out the cell column and row.
-            col = ""
-            row = ""
-            for c in cell_index:
-                if (c.isalpha()):
-                    col += c
-                else:
-                    row += c
+
+            # Do we have something like '10, 30'?
+            index_pat = r"(\d+)\s*,\s*(\d+)"
+            if (re.search(index_pat, cell_index) is not None):
+                indices = re.findall(index_pat, cell_index)[0]
+                row = int(indices[0]) - 1
+                col = int(indices[1]) - 1
+
+            # Maybe something like 'A4:B7' ?
+            else:
+                col = ""
+                row = ""
+                for c in cell_index:
+                    if (c.isalpha()):
+                        col += c
+                    else:
+                        row += c
                     
-            # Convert the row and column to numeric indices for xlrd.
-            row = int(row) - 1
-            col = excel_col_letter_to_index(col)
+                # Convert the row and column to numeric indices for xlrd.
+                row = int(row) - 1
+                col = excel_col_letter_to_index(col)
             
             # Pull out the cell value.
             val = str(sheet.cell_value(row, col))
