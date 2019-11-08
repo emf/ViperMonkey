@@ -241,6 +241,7 @@ class Parameter(VBA_Object):
         self.init_val = tokens.init_val
         self.is_array = False
         self.mechanism = str(tokens.mechanism)
+        self.is_optional = (len(tokens.is_optional) > 0)
         # Is this an array parameter?
         if (('(' in str(tokens)) and (')' in str(tokens))):
             # Arrays are always passed by reference.
@@ -310,7 +311,7 @@ untyped_name_param_dcl = identifier + Optional(parameter_type)
 # MS-GRAMMAR: param_dcl = untyped_name_param_dcl | typed_name_param_dcl
 # MS-GRAMMAR: typed_name_param_dcl = TYPED_NAME [array_designator]
 
-parameter = Optional(CaselessKeyword("optional").suppress()) + Optional(parameter_mechanism('mechanism')) + Optional(CaselessKeyword("ParamArray").suppress()) + \
+parameter = Optional(CaselessKeyword("optional").suppress())('is_optional') + Optional(parameter_mechanism('mechanism')) + Optional(CaselessKeyword("ParamArray").suppress()) + \
             TODO_identifier_or_object_attrib('name') + \
             Optional(CaselessKeyword("(") + ZeroOrMore(" ").suppress() + CaselessKeyword(")")) + \
             Optional(CaselessKeyword('as').suppress() + (lex_identifier('type') ^ reserved_complex_type_identifier('type'))) + \
@@ -1299,6 +1300,20 @@ class For_Statement(VBA_Object):
             if (("(" not in var) and (")" not in var)):
                 context.set(self.name, end + step)
                 return (var, end + step)
+
+        # Are we just doing 1 Debug.Print in the loop?
+        body1 = body.replace("Call_Statement:", "").strip()
+        if (body1.startswith("Debug.Print")):
+
+            # Just run the loop body once.
+            self.statements[0].eval(context)
+
+            # Set the final value of the loop index variable.
+            context.set(self.name, end + step)
+
+            # Indicate that the loop was short circuited.
+            log.info("Short circuited Debug.Print only loop " + str(self))
+            return ("N/A", "N/A")
             
         # Are we just modifying a single variable each loop iteration by a single literal value?
         #   VXjDxrfvbG0vUiQ = VXjDxrfvbG0vUiQ + 1
@@ -2836,8 +2851,8 @@ class Call_Statement(VBA_Object):
         log.info('Calling Procedure: %s(%r)' % (self.name, str_params))
         if (is_external):
             context.report_action("External Call", self.name + "(" + str(call_params) + ")", self.name, strip_null_bytes=True)
-        if self.name.lower() in context._log_funcs \
-                or any(self.name.lower().endswith(func.lower()) for func in Function_Call.log_funcs):
+        if ((self.name.lower() in context._log_funcs) or
+            (any(self.name.lower().endswith(func.lower()) for func in Function_Call.log_funcs))):
             context.report_action(self.name, call_params, 'Interesting Function Call', strip_null_bytes=True)
 
         # Handle method calls inside a With statement.
@@ -3356,7 +3371,7 @@ class Print_Statement(VBA_Object):
         data = eval_arg(self.value, context=context)
 
         context.write_file(file_id, data)
-        context.write_file(file_id, '\r\n')
+        #context.write_file(file_id, '\r\n')
 
 
 print_statement = Suppress(CaselessKeyword("Print")) + file_pointer("file_id") + Suppress(Optional(",")) + expression("value") + \

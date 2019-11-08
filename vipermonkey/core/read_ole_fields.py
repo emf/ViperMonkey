@@ -47,6 +47,115 @@ import olefile
 from logger import log
 import filetype
 
+def unzip_data(data):
+    """
+    Unzip zipped data in memory.
+    """
+
+    # Unzip the data.
+    # PKZip magic #: 50 4B 03 04
+    zip_magic = chr(0x50) + chr(0x4B) + chr(0x03) + chr(0x04)
+    contents = None
+    delete_file = False
+    fname = None
+    if data.startswith(zip_magic):
+        #raise ValueError("_get_shapes_text_values_2007() currently does not support in-memory Office files.")
+        # TODO: Fix this. For now just save to a tmp file.
+        tmp_name = "/tmp/" + str(random.randrange(0, 10000000000)) + ".office"
+        f = open(tmp_name, 'wb')
+        f.write(data)
+        f.close()
+        fname = tmp_name
+        delete_file = True
+    else:
+        return (None, None)
+        
+    # Is this a ZIP file?
+    try:
+        if (not zipfile.is_zipfile(fname)):
+            if (delete_file):
+                os.remove(fname)
+            return (None, None)
+    except:
+        if (delete_file):
+            os.remove(fname)
+        return (None, None)
+        
+    # This is a ZIP file. Unzip it.
+    unzipped_data = zipfile.ZipFile(fname, 'r')
+
+    # Return the unzipped data and temp file name.
+    return (unzipped_data, fname)
+    
+def get_msftedit_variables_97(data):
+    """
+    Looks for variable/text value pairs stored in an embedded rich edit control from an Office 97 doc.
+    See https://docs.microsoft.com/en-us/windows/win32/controls/about-rich-edit-controls.
+    """
+
+    # Pattern for the object data
+    pat = r"'\x01\xff\xff\x03.+?\x5c\x00\x70\x00\x61\x00\x72\x00\x0d\x00\x0a\x00\x7d"
+    r = []
+    for chunk in re.findall(pat, data, re.DOTALL):
+
+        # Names and values are wide character strings. Strip out the null bytes.
+        chunk = chunk.replace("\x00", "")
+    
+        # Pull out the name of the current thing .
+
+        # Marker 1
+        name_pat = r"'\x01\xff\xff\x03\x92\x03\x04([A-Za-z0-9_]+)"
+        names = re.findall(name_pat, chunk)
+
+        # Punt if no names found and just pull out everything that looks like it might be a name.
+        if (len(names) != 1):
+            name_pat = r"([A-Za-z0-9_]+)"
+            tmp = re.findall(name_pat, chunk)
+            names = []
+            for poss_name in tmp:
+                if (len(poss_name) < 30):
+                    names.append(poss_name)
+        
+        # Pull out the data for the current thing.
+        data_pat = r"\\fs\d{1,3} (.+)\\par"
+        chunk_data = re.findall(data_pat, chunk, re.DOTALL)
+        if (len(chunk_data) != 1):
+            continue
+        chunk_data = chunk_data[0]
+
+        # Save the variable/value pairs.
+        for chunk_name in names:
+            r.append((chunk_name, chunk_data))
+
+    # Done.
+    return r
+
+def get_msftedit_variables(obj):
+    """
+    Looks for variable/text value pairs stored in an embedded rich edit control from an Office 97 or 2007+ doc.
+    See https://docs.microsoft.com/en-us/windows/win32/controls/about-rich-edit-controls.
+    """
+
+    # Figure out if we have been given already read in data or a file name.
+    if obj[0:4] == '\xd0\xcf\x11\xe0':
+        #its the data blob
+        data = obj
+    else:
+        fname = obj
+        try:
+            f = open(fname, "rb")
+            data = f.read()
+            f.close()
+        except:
+            data = obj
+
+    # Is this an Office 97 file?
+    if (filetype.is_office97_file(data, True)):
+        return get_msftedit_variables_97(data)
+
+    # This is an Office 2007+ file.
+    return []
+
 def get_ole_textbox_values(obj, vba_code):
     """
     Read in the text associated with embedded OLE form textbox objects.
@@ -96,8 +205,9 @@ def get_ole_textbox_values(obj, vba_code):
     
     # Set the general marker for Form data chunks and fields in the Form chunks.
     form_str = "Microsoft Forms 2.0"
+    form_str_pat = r"Microsoft Forms 2.0 [A-Za-z]{2,30}(?!Form)"
     field_marker = "Forms."
-    if (form_str not in data):
+    if (re.search(form_str_pat, data) is None):
         if debug:
             print "NO FORMS"
             sys.exit(0)
@@ -108,14 +218,15 @@ def get_ole_textbox_values(obj, vba_code):
     r = []
     found_names = set()
     long_strs = []
-    while (form_str in data[index:]):
+    while (re.search(form_str_pat, data[index:]) is not None):
 
         # Break out the data for an embedded OLE textbox form.
 
         # Move to the end of specific versions of the form string.
         # "Microsoft Forms 2.0 TextBox", "Microsoft Forms 2.0 ComboBox", etc.
-        index = data[index:].index(form_str) + index
-        start = index + len(form_str)
+        search_r = re.search(form_str_pat, data[index:])
+        index = search_r.start() + index
+        start = index + len(search_r.group(0))
         while ((start < len(data)) and (ord(data[start]) in range(32, 127))):
             start += 1
 
@@ -319,8 +430,11 @@ def get_ole_textbox_values(obj, vba_code):
                 print strs[name_pos + 1]
                 
             # Only used with large text values?
-            if (len(strs[name_pos + 1]) > 20):
+            if (len(strs[name_pos + 1]) > 10):
                 text = strs[name_pos + 1]
+                if debug:
+                    print "Value: 2"
+                    print strs[name_pos + 1]
 
         # Break out the (possible additional) value.
         val_pat = r"(?:\x00|\xff)[\x20-\x7e]+[^\x00]*\x00+\x02\x18"
@@ -329,8 +443,11 @@ def get_ole_textbox_values(obj, vba_code):
             empty_pat = r"(?:\x00|\xff)#[^\x00]*\x00+\x02\x18"
             if (len(re.findall(empty_pat, vals[0])) == 0):
                 poss_val = re.findall(r"[\x20-\x7e]+", vals[0][1:-2])[0]
-                if (poss_val != text):
+                if ((poss_val != text) and (len(poss_val) > 1)):
                     text += poss_val.replace("\x00", "")
+                    if debug:
+                        print "Value: 3"
+                        print poss_val.replace("\x00", "")
 
         # Pattern 2                    
         val_pat = r"\x00#\x00\x00\x00[^\x02]+\x02"
@@ -341,7 +458,7 @@ def get_ole_textbox_values(obj, vba_code):
                 poss_val = tmp_text[0]
                 if (poss_val != text):
                     if debug:
-                        print "Value: 3"
+                        print "Value: 4"
                         print poss_val
                     text += poss_val
 
@@ -351,6 +468,9 @@ def get_ole_textbox_values(obj, vba_code):
         if (len(vals) > 0):
             for v in vals:
                 text += v
+                if debug:
+                    print "Value: 5"
+                    print v
 
         # Pattern 4
         val_pat = r"([\x20-\x7e]{5,})\x00{2,4}\x02\x0c"
@@ -358,12 +478,21 @@ def get_ole_textbox_values(obj, vba_code):
         if (len(vals) > 0):
             for v in vals:
                 text += v
+                if debug:
+                    print "Value: 6"
+                    print v
                 
         # Maybe big chunks of text after the name are part of the value?
         for pos in range(name_pos + 2, len(strs)):
             curr_str = strs[pos].replace("\x00", "")
-            if (len(curr_str) > 40):
+            if ((len(curr_str) > 40) and (not curr_str.startswith("Microsoft "))):
                 text += curr_str
+
+        if debug:
+            print "ORIG:"
+            print name
+            print text
+            print len(text)
                 
         # Pull out the size of the text.
         # Try version 1.
@@ -377,14 +506,15 @@ def get_ole_textbox_values(obj, vba_code):
             # Try version 3.
             size_pat = r"\xf8\x00\x28\x00\x00\x00(.{2})"
             tmp = re.findall(size_pat, chunk)
+        if (len(tmp) == 0):
+            # Try version 4.
+            size_pat = r"\x2c\x00\x00\x00\x1d\x00\x00\x00(.{2})"
+            tmp = re.findall(size_pat, chunk)
         if (len(tmp) > 0):
             size_bytes = tmp[0]
             size = ord(size_bytes[1]) * 256 + ord(size_bytes[0])
-            if debug:
-                print "ORIG:"
-                print name
-                print text
-                print len(text)
+            if (debug):
+                print "SIZE: "
                 print size
             if (len(text) > size):
                 text = text[:size]
@@ -395,7 +525,9 @@ def get_ole_textbox_values(obj, vba_code):
         # Save long strings. Maybe they are the value of a previous variable?
         longest_str = ""
         for field in strs:
-            if ((len(field) > 30) and (len(field) > len(longest_str))):
+            if ((len(field) > 30) and
+                (len(field) > len(longest_str)) and
+                (not field.startswith("Microsoft "))):
                 longest_str = field
         long_strs.append(longest_str)
 
@@ -662,40 +794,86 @@ def _get_shapes_text_values_direct_2007(data):
     r = [(name, val)]
     return r
 
+def _parse_activex_chunk(data):
+    """
+    Parse out ActiveX text values from 2007+ activeXN.bin file contents.
+    """
+
+    # Pull out the text associated with the object.
+    anchor = None
+    pad = 0
+    if (b"\x1a\x00\x00\x00\x23" in data):
+        anchor = b"\x1a\x00\x00\x00\x23"
+        pad = 3
+    elif (b"\x05\x00\x00\x00\x01\x00\x00\x80" in data):
+        anchor = b"\x05\x00\x00\x00\x01\x00\x00\x80"
+        pad = 16
+    elif (b"\x30\x01\x00\x00" in data):
+        anchor = b"\x30\x01\x00\x00"
+    if (anchor is None):
+        return None
+    start = data.rindex(anchor) + len(anchor) + pad
+    pat = r"([\x20-\x7e]+)"
+    text = re.findall(pat, data[start:])
+    if (len(text) == 0):
+        return None
+    text = text[0]
+
+    # Pull out the size of the text.
+    # Try version 1.
+    size_pat = r"\x48\x80\x2c\x03\x01\x02\x00(.{2})"
+    tmp = re.findall(size_pat, data)
+    if (len(tmp) == 0):
+        # Try version 2.
+        size_pat = r"\x48\x80\x2c(.{2})"
+        tmp = re.findall(size_pat, data)
+    if (len(tmp) == 0):
+        # Try version 3.
+        size_pat = r"\x00\x01\x00\x00\x80(.{2})"
+        tmp = re.findall(size_pat, data)
+    if (len(tmp) > 0):
+        size_bytes = tmp[0]
+        size = ord(size_bytes[1]) * 256 + ord(size_bytes[0])
+        #print "size: " + str(size)
+        if (len(text) > size):
+            text = text[:size]
+        
+    # Debug.
+    #print "---------"
+    #print shape
+    #print "^^^^^^^"
+    #print data
+    #print "^^^^^^^"
+    #print text
+
+    return text
+
+def _parse_activex_rich_edit(data):
+    """
+    Parse out Rich Edit control text values from 2007+ activeXN.bin file contents.
+    """
+
+    # No wide char null padding.
+    data = data.replace("\x00", "")
+
+    # Pull out the data.
+    pat = r"\\fs\d{1,4} (.+)\\par"
+    val = re.findall(pat, data)
+    if (len(val) == 0):
+        return None
+    return val[0]
+    
 def _get_shapes_text_values_2007(fname):
     """
     Read in the text associated with Shape objects in a document saved
     in the 2007+ format.
     """
-
-    # Unzip the file.
-    # PKZip magic #: 50 4B 03 04
-    zip_magic = chr(0x50) + chr(0x4B) + chr(0x03) + chr(0x04)
-    contents = None
-    delete_file = False
-    if fname.startswith(zip_magic):
-        #raise ValueError("_get_shapes_text_values_2007() currently does not support in-memory Office files.")
-        # TODO: Fix this. For now just save to a tmp file.
-        tmp_name = "/tmp/" + str(random.randrange(0, 10000000000)) + ".office"
-        f = open(tmp_name, 'wb')
-        f.write(fname)
-        f.close()
-        fname = tmp_name
-        delete_file = True
-
-    # Is this a ZIP file?
-    try:
-        if (not zipfile.is_zipfile(fname)):
-            if (delete_file):
-                os.remove(fname)
-            return []
-    except:
-        if (delete_file):
-            os.remove(fname)
-        return []
         
-    # This is a 2007+ Office file. Unzip it.
-    unzipped_data = zipfile.ZipFile(fname, 'r')
+    # This might be a 2007+ Office file. Unzip it.
+    unzipped_data, fname = unzip_data(fname)
+    delete_file = (fname is not None)
+    if (unzipped_data is None):
+        return []
 
     # Shapes with internal IDs are in word/document.xml. Does that file exist?
     zip_subfile = 'word/document.xml'
@@ -767,53 +945,15 @@ def _get_shapes_text_values_2007(fname):
         data = f1.read()
         f1.close()
 
-        # Pull out the text associated with the object.
-        anchor = None
-        pad = 0
-        if (b"\x1a\x00\x00\x00\x23" in data):
-            anchor = b"\x1a\x00\x00\x00\x23"
-            pad = 3
-        elif (b"\x05\x00\x00\x00\x01\x00\x00\x80" in data):
-            anchor = b"\x05\x00\x00\x00\x01\x00\x00\x80"
-            pad = 16
-        elif (b"\x30\x01\x00\x00" in data):
-            anchor = b"\x30\x01\x00\x00"
-        if (anchor is None):
-            continue
-        start = data.rindex(anchor) + len(anchor) + pad
-        pat = r"([\x20-\x7e]+)"
-        text = re.findall(pat, data[start:])
-        if (len(text) == 0):
-            continue
-        text = text[0]
+        # Is this a regular ActiveX object?
+        text = _parse_activex_chunk(data)
 
-        # Pull out the size of the text.
-        # Try version 1.
-        size_pat = r"\x48\x80\x2c\x03\x01\x02\x00(.{2})"
-        tmp = re.findall(size_pat, data)
-        if (len(tmp) == 0):
-            # Try version 2.
-            size_pat = r"\x48\x80\x2c(.{2})"
-            tmp = re.findall(size_pat, data)
-        if (len(tmp) == 0):
-            # Try version 3.
-            size_pat = r"\x00\x01\x00\x00\x80(.{2})"
-            tmp = re.findall(size_pat, data)
-        if (len(tmp) > 0):
-            size_bytes = tmp[0]
-            size = ord(size_bytes[1]) * 256 + ord(size_bytes[0])
-            #print "size: " + str(size)
-            if (len(text) > size):
-                text = text[:size]
-        
-        # Debug.
-        #print "---------"
-        #print shape
-        #print "^^^^^^^"
-        #print data
-        #print "^^^^^^^"
-        #print text
-
+        # Is this a Rich Edit control?
+        if (text is None):
+            text = _parse_activex_rich_edit(data)
+        if (text is None):
+            continue
+            
         # Save the text associated with the variable name.
         r.append((id_name_map[shape], text))
     
@@ -821,6 +961,7 @@ def _get_shapes_text_values_2007(fname):
     unzipped_data.close()
     if (delete_file):
         os.remove(fname)
+    #print r
     #sys.exit(0)
     return r
 

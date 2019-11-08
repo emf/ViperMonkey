@@ -133,6 +133,16 @@ class IsEmpty(VbaLibraryFunc):
             return True
         return False
 
+class LanguageID(VbaLibraryFunc):
+    """
+    Stubbed LanguageID() reference.
+    """
+
+    def eval(self, context, params=None):
+        
+        # This is usually used for gating, so have it match anything.
+        return "**MATCH ANY**"
+
 class URLDownloadToFile(VbaLibraryFunc):
     """
     URLDownloadToFile() external function
@@ -459,7 +469,7 @@ class Left(VbaLibraryFunc):
         s = params[0]
 
         # Don't modify the "**MATCH ANY**" special value.
-        if (s == "**MATCH ANY**"):
+        if (str(s).strip() == "**MATCH ANY**"):
             return s
         
         # "If String contains the data value Null, Null is returned."
@@ -507,6 +517,14 @@ class EOF(VbaLibraryFunc):
     def eval(self, context, params=None):
         return True
 
+class Error(VbaLibraryFunc):
+    """
+    Stubbed Error() method.
+    """
+
+    def eval(self, context, params=None):
+        return "Some error message..."
+
 class Right(VbaLibraryFunc):
     """
     Right function.
@@ -519,7 +537,7 @@ class Right(VbaLibraryFunc):
         s = params[0]
 
         # Don't modify the "**MATCH ANY**" special value.
-        if (s == "**MATCH ANY**"):
+        if (str(s).strip() == "**MATCH ANY**"):
             return s
         
         # "If String contains the data value Null, Null is returned."
@@ -2905,6 +2923,11 @@ class Cells(VbaLibraryFunc):
 
     def eval(self, context, params=None):
 
+        # Sanity check.
+        if (params is None):
+            log.error("Parameters of Cells() call are None.")
+            return self
+        
         # Do we have a loaded Excel file?
         if (context.loaded_excel is None):
             log.warning("Cannot process Cells() call. No Excel file loaded.")
@@ -3469,7 +3492,8 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                AddFromString, Not, PrivateProfileString, GetCursorPos, CreateElement,
                IsObject, NumPut, GetLocale, URLDownloadToFile, URLDownloadToFileA,
                URLDownloadToFileW, SaveAs, Quit, Exists, RegRead, Kill, RmDir, EOF,
-               MonthName, GetSpecialFolder, IsEmpty, Date, DeleteFile, MoveFile, DateAdd):
+               MonthName, GetSpecialFolder, IsEmpty, Date, DeleteFile, MoveFile, DateAdd,
+               Error, LanguageID):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

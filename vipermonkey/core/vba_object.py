@@ -56,6 +56,7 @@ from logger import log
 import re
 from curses_ascii import isprint
 import traceback
+import string
 
 from inspect import getouterframes, currentframe
 import sys
@@ -613,6 +614,10 @@ def eval_args(args, context, treat_as_var_name=False):
     Evaluate a list of arguments if they are VBA_Objects, otherwise return their value as-is.
     Return the list of evaluated arguments.
     """
+    try:
+        iterator = iter(args)
+    except TypeError:
+        return args
     r = map(lambda arg: eval_arg(arg, context=context, treat_as_var_name=treat_as_var_name), args)
     return r
 
@@ -799,13 +804,15 @@ def int_convert(arg):
     """
     if (arg == "NULL"):
         return 0
+    if (arg == "**MATCH ANY**"):
+        return arg
     arg_str = str(arg)
     if ("." in arg_str):
         arg_str = arg_str[:arg_str.index(".")]
     try:
         return int(arg_str)
     except Exception as e:
-        log.error("Cannot convert '" + str(arg_str) + "' to int. Defaulting to 0." + str(e))
+        log.error("Cannot convert '" + str(arg_str) + "' to int. Defaulting to 0. " + str(e))
         return 0
 
 def str_convert(arg):
@@ -814,7 +821,13 @@ def str_convert(arg):
     """
     if (arg == "NULL"):
         return ''
-    return str(arg)
+    try:
+        return str(arg)
+    except Exception as e:
+        if (isinstance(arg, unicode)):
+            return ''.join(filter(lambda x:x in string.printable, arg))
+        log.error("Cannot convert given argument to str. Defaulting to ''. " + str(e))
+        return ''
 
 def strip_nonvb_chars(s):
     """
