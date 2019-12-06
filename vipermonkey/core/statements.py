@@ -873,7 +873,9 @@ class Let_Statement(VBA_Object):
         if ((str(self.name).endswith(".Arguments")) or
             (str(self.name).endswith(".Path"))):
             context.report_action(self.name, value, 'Possible Scheduled Task Setup', strip_null_bytes=True)
-
+        if (str(self.name).endswith(".CommandLine")):
+            context.report_action('Run Command', value, self.name, strip_null_bytes=True)
+            
         # Modifying a string using something like Mid() on the LHS of the assignment?
         if (self._handle_string_mod(context, value)):
             return
@@ -997,6 +999,30 @@ class Let_Statement(VBA_Object):
         # Set variable, array access.
         else:
 
+            # Handle conversion of strings to integers, if needed.
+            if (((context.get_type(self.name) == "Long Array") or
+                 (context.get_type(self.name) == "Integer Array")) and
+                (isinstance(value, str))):
+
+                # Do we have an actual value to assign?
+                if (value != "NULL"):
+
+                    # Parse the expression to see if it can be resolved to an integer.
+                    num = "not an integer"
+                    try:
+                        expr = expression.parseString(value, parseAll=True)[0]
+                        num = str(expr)
+                        if (hasattr(expr, "eval")):
+                            num = str(expr.eval(context))
+                    except ParseException:
+                        log.error("Cannot parse '" + value + "' to integer.")
+                    if (not num.isdigit()):
+                        log.error("Cannot convert '" + value + "' to integer. Setting to 0.")
+                        num = 0
+                    else:
+                        num = int(num)
+                    value = num
+                        
             # Evaluate the index expression(s).
             index = int_convert(eval_arg(self.index, context=context))
             index1 = None
@@ -2549,13 +2575,19 @@ class If_Statement(VBA_Object):
         super(If_Statement, self).__init__(original_str, location, tokens)
 
         # Copy constructor?
+        self.is_bogus = False
         if (isinstance(tokens, If_Statement)):
             self.pieces = tokens.pieces
             return
         if ((len(tokens) == 1) and (isinstance(tokens[0], If_Statement))):
             self.pieces = tokens[0].pieces
             return
-            
+
+        # bogus_if_statement parsed?
+        if ((len(tokens) == 1) and (isinstance(tokens[0], BoolExpr))):
+            self.is_bogus = True
+            return
+        
         # Save the boolean guard and body for each case in the if, in order.
         self.pieces = []
         for tok in tokens:
@@ -2579,6 +2611,8 @@ class If_Statement(VBA_Object):
         if (self._children is not None):
             return self._children
         self._children = []
+        if (self.is_bogus):
+            return self._children
         for piece in self.pieces:
             if (isinstance(piece["body"], VBA_Object)):
                 self._children.append(piece["body"])
@@ -2600,6 +2634,8 @@ class If_Statement(VBA_Object):
         return self._to_str(True)
     
     def _to_str(self, full_str):
+        if (self.is_bogus):
+            return "BOGUS IF STATEMENT"
         r = ""
         first = True
         for piece in self.pieces:
@@ -2646,6 +2682,10 @@ class If_Statement(VBA_Object):
             
     def eval(self, context, params=None):
 
+        # Skip this if it is a bogus, do nothing if statement.
+        if (self.is_bogus):
+            return
+        
         # Exit if an exit function statement was previously called.
         if (context.exit_func):
             return
@@ -2707,7 +2747,9 @@ _single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_ex
 single_line_if_statement = _single_line_if_statement
 single_line_if_statement.setParseAction(If_Statement)
 
-simple_if_statement = multi_line_if_statement ^ _single_line_if_statement
+bogus_if_statement = CaselessKeyword("If").suppress() + boolean_expression + Optional(CaselessKeyword("Then")).suppress()
+
+simple_if_statement = multi_line_if_statement ^ _single_line_if_statement ^ bogus_if_statement
 simple_if_statement.setParseAction(If_Statement)
 
 # --- IF-THEN-ELSE statement, macro version ----------------------------------------------------------
@@ -2893,8 +2935,9 @@ class Call_Statement(VBA_Object):
                 # Set the values of the arguments passed as ByRef parameters.
                 if (hasattr(s, "byref_params") and s.byref_params):
                     for byref_param_info in s.byref_params.keys():
-                        arg_var_name = str(self.params[byref_param_info[1]])
-                        context.set(arg_var_name, s.byref_params[byref_param_info])
+                        if (byref_param_info[1] < len(self.params)):
+                            arg_var_name = str(self.params[byref_param_info[1]])
+                            context.set(arg_var_name, s.byref_params[byref_param_info])
 
                 # We are out of the called function, so if we exited the called function early
                 # it does not apply to the current function.
@@ -3187,7 +3230,7 @@ class Goto_Statement(VBA_Object):
         block.eval(context, params)
 
 # Goto statement
-goto_statement = CaselessKeyword('Goto').suppress() + lex_identifier('label')
+goto_statement = (CaselessKeyword('Goto').suppress() | CaselessKeyword('Gosub').suppress()) + lex_identifier('label')
 goto_statement.setParseAction(Goto_Statement)
 
 # --- GOTO LABEL statement ----------------------------------------------------------
@@ -3527,10 +3570,15 @@ class External_Function(VBA_Object):
         # Exit if an exit function statement was previously called.
         if (context.exit_func):
             return
-        
+
+        # If we emulate an external function we are treating it like a VBA builtin function.
+        # So we won't create a new context.
+        #
         # create a new context for this execution:
-        caller_context = context
-        context = Context(context=caller_context)
+        #caller_context = context
+        #context = Context(context=caller_context)
+
+        # Resolve aliased function names.
         if self.alias_name:
             function_name = self.alias_name
         else:

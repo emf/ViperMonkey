@@ -115,7 +115,7 @@ def is_interesting_call(line, external_funcs, local_funcs):
                  ".Open", "GetObject", "Create", ".Create", "Environ",
                  "CreateTextFile", ".CreateTextFile", "Eval", ".Eval", "Run",
                  "SetExpandedStringValue", "WinExec", "URLDownloadToFile", "Print",
-                 "Split"]
+                 "Split", "Exec"]
     if (not aggressive_strip):
         log_funcs.extend(local_funcs)
     for func in log_funcs:
@@ -403,12 +403,21 @@ def fix_difficult_code(vba_code):
     # Skip this if it is not needed.
     if (("!" not in vba_code) and
         (":" not in vba_code) and
+        ("&;" not in vba_code) and
         ("^" not in vba_code) and
         ("Rem " not in vba_code) and
+        ("MultiByteToWideChar" not in vba_code) and
         (re.match(r".*[\x7f-\xff].*", vba_code, re.DOTALL) is None) and
         (re.match(r".*=\+.*", vba_code, re.DOTALL) is None)):
         return vba_code
 
+    # Modify MultiByteToWideChar() calls so ViperMonkey can emulate them.
+    # Orig: lSize = MultiByteToWideChar(CP_UTF8, 0, baValue(0), UBound(baValue) + 1, StrPtr(sValue), Len(sValue))
+    # Desired: lSize = MultiByteToWideChar(CP_UTF8, 0, baValue, UBound(baValue) + 1, StrPtr("&sValue"), Len(sValue))
+    if ("MultiByteToWideChar" in vba_code):
+        mbyte_pat = r"(MultiByteToWideChar\(\s*[^,]+,\s*[^,]+,\s+)([A-Za-z0-9_]+)\(\s*[^\)]+\s*\)(,\s*[^,]+,\s*StrPtr\(\s*)([^\)]+)(\s*\),\s*[^\)]+\))"
+        vba_code = re.sub(mbyte_pat, r'\1\2\3"&\4"\5', vba_code)
+    
     # Temporarily replace macro #if, etc. with more unique strings. This is needed
     # to handle tracking '#...#' delimited date strings in the next loop.
     vba_code = vba_code.replace("#if", "HASH__if")
@@ -441,12 +450,16 @@ def fix_difficult_code(vba_code):
     vba_code = vba_code.replace(" Rem ", " ' ")
         
     # Characters that change how we modify the code.
-    interesting_chars = [r'"', r'\#', r"'", r"\!", r"\+", r"\:", "\n", r"[\x7f-\xff]", r"\^"]
+    interesting_chars = [r'"', r'\#', r"'", r"\!", r"\+",
+                         r"\:", "\n", r"[\x7f-\xff]", r"\^", ";",
+                         r"\[", r"\]"]
     
     # Replace bad characters unless they appear in a string.
     in_str = False
     in_comment = False
-    in_date = False
+    in_date = False    
+    in_square_bracket = False
+    num_square_brackets = 0
     prev_char = ""
     next_char = ""
     r = ""
@@ -497,6 +510,14 @@ def fix_difficult_code(vba_code):
         # Handle entering/leaving strings.        
         if ((not in_comment) and (c == '"')):
             in_str = not in_str
+
+        # Handle entering/leaving [] expressions.
+        if ((not in_comment) and (not in_str)):
+            if (c == '['):
+                num_square_brackets += 1
+            if (c == ']'):
+                num_square_brackets -= 1
+            in_square_bracket = (num_square_brackets > 0)
             
         # Handle entering/leaving date constants.
         if ((not in_comment) and (not in_str) and (c == '#')):
@@ -552,6 +573,12 @@ def fix_difficult_code(vba_code):
 
             # Skip the '+'.
             continue
+
+        # Need to eliminate bogus &; string concatenations.
+        if ((c == ";") and (prev_char == "&")):
+
+            # Skip the ';'.
+            continue
             
         # Non-ASCII character that is not in a string?
         if (ord(c) > 127):
@@ -563,8 +590,8 @@ def fix_difficult_code(vba_code):
                 r = r[:-1]
                 r += "\n"
 
-            # Replace a single ':' with a line break? Don't do this for labels.
-            elif ((c == ':') and (next_char != "\n") and (next_char != '"') and (next_char != "=")):
+            # Replace a single ':' with a line break? Don't do this for labels. Or for Excel [A:A] expressions.
+            elif ((c == ':') and (next_char != "\n") and (next_char != '"') and (next_char != "=") and (not in_square_bracket)):
                 r += "\n"
             else:
                 r += c
@@ -762,6 +789,11 @@ def strip_useless_code(vba_code, local_funcs):
     # Preprocess the code to make it easier to parse.
     log.info("Modifying VB code...")
     vba_code = fix_vba_code(vba_code)
+
+    # Don't strip lines if Execute() is called since the stripped variables
+    # could be used in the execed code strings.
+    if ("Execute(" in vba_code):
+        return vba_code
     
     # Track data change callback function names.
     change_callbacks = set()    

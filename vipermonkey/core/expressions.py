@@ -267,8 +267,10 @@ class MemberAccessExpression(VBA_Object):
             (tmp_rhs.name != "Item")):
             return None
         index = eval_arg(tmp_rhs.params[0], context)
-        if ((not isinstance(index, int)) or (index >= len(curr_item))):
+        if (not isinstance(index, int)):
             return None
+        if (index >= len(curr_item)):
+            return "NULL"
 
         # Return the list item.
         return curr_item[index]
@@ -899,7 +901,28 @@ class MemberAccessExpression(VBA_Object):
             return r
         except KeyError:
             pass
-        
+
+        # TODO: Need to actually have some sort of object model. For now
+        # just treat this as a variable access.
+        rhs = None
+        if (len(self.rhs1) > 0):
+            rhs = self.rhs1
+        else:
+            rhs = self.rhs[len(self.rhs) - 1]
+            if ((str(rhs) == "Text") and (len(self.rhs) > 1)):
+                rhs = self.rhs[len(self.rhs) - 2]
+
+        # Figure out if we are calling a function.
+        calling_func = isinstance(rhs, Function_Call)
+        if (not calling_func):
+            try:
+                func = context.get(str(rhs), search_wildcard=False)
+                log.debug("Member access " + str(self) + " got RHS = " + str(func))
+                calling_func = (isinstance(func, procedures.Function) or isinstance(func, procedures.Sub))
+                log.debug("Member access " + str(self) + " calling function = " + str(calling_func))
+            except KeyError:
+                pass
+                
         # Handle accessing control values from a form by index..
         call_retval = self._handle_indexed_form_access(context)
         if (call_retval is not None):
@@ -936,9 +959,10 @@ class MemberAccessExpression(VBA_Object):
             return call_retval
         
         # Handle accessing document variables as a special case.
-        call_retval = self._handle_docvars_read(context)
-        if (call_retval is not None):
-            return call_retval
+        if (not calling_func):
+            call_retval = self._handle_docvars_read(context)
+            if (call_retval is not None):
+                return call_retval
 
         # Handle setting the clipboard text.
         call_retval = self._handle_set_clipboard(context)
@@ -983,17 +1007,6 @@ class MemberAccessExpression(VBA_Object):
         call_retval = self._handle_regex_execute(context, tmp_lhs)
         if (call_retval is not None):
             return call_retval
-        
-        # TODO: Need to actually have some sort of object model. For now
-        # just treat this as a variable access.
-        tmp_rhs = None
-        rhs = None
-        if (len(self.rhs1) > 0):
-            rhs = self.rhs1
-        else:
-            rhs = self.rhs[len(self.rhs) - 1]
-            if ((str(rhs) == "Text") and (len(self.rhs) > 1)):
-                rhs = self.rhs[len(self.rhs) - 2]
 
         # Handle simple 0-argument function calls.
         call_retval = self._handle_0_arg_call(context, rhs)
@@ -1017,13 +1030,16 @@ class MemberAccessExpression(VBA_Object):
         # If the final element in the member expression is a function call,
         # the result should be the result of the function call. Otherwise treat
         # it as a fancy variable access.
-        if (isinstance(rhs, Function_Call)):
+        if (calling_func):
             log.debug('rhs {!r} is a Function_Call'.format(rhs))
 
             # Skip local functions that have a name collision with VBA built in functions.
-            if (context.contains_user_defined(rhs.name)):
+            rhs_name = str(rhs)
+            if (hasattr(rhs, "name")):
+                rhs_name = rhs.name
+            if (context.contains_user_defined(rhs_name)):
                 for func in Function_Call.log_funcs:
-                    if (rhs.name.lower() == func.lower()):
+                    if (rhs_name.lower() == func.lower()):
                         return str(self)
 
             # Handle things like foo.Replace(bar, baz).
@@ -1110,7 +1126,8 @@ class MemberAccessExpression(VBA_Object):
             tmp_rhs = eval_arg(rhs, context)
             var_pat = r"[A-za-z_0-9]+"
             if ((tmp_rhs != rhs) and
-                ((re.match(var_pat, tmp_lhs) is not None) or (str(tmp_lhs).lower().endswith(".application"))) and
+                ((re.match(var_pat, str(tmp_lhs)) is not None) or
+                 (str(tmp_lhs).lower().endswith(".application"))) and
                 (tmp_rhs != "NULL") and
                 ("vipermonkey.core.vba_library" not in str(type(tmp_rhs)))):
                 log.debug("Resolved member access variable.")
@@ -1134,10 +1151,10 @@ l_expression = Forward()
 function_call_limited = Forward()
 func_call_array_access_limited = Forward()
 function_call = Forward()
+excel_expression = Forward()
 
 member_object_limited = (
-    ((Suppress("[") + unrestricted_name + Suppress("]")) |
-     unrestricted_name)
+    ((Suppress("[") + unrestricted_name + Suppress("]")) | unrestricted_name | excel_expression)
     + NotAny("(")
     + NotAny("#")
     + NotAny("$")
@@ -1679,6 +1696,7 @@ expr_item <<= (
         | placeholder
         | typeof_expression
         | addressof_expression
+        | excel_expression
     )
 )
 
@@ -2097,3 +2115,24 @@ class AddressOf_Expression(VBA_Object):
 
 addressof_expression <<= CaselessKeyword("AddressOf") + expression("item")
 addressof_expression.setParseAction(AddressOf_Expression)
+
+# --- EXCEL ROW/COLUMN EXPRESSION --------------------------------------------------------------
+
+class Excel_Expression(VBA_Object):
+
+    def __init__(self, original_str, location, tokens):
+        super(Excel_Expression, self).__init__(original_str, location, tokens)
+        self.row = tokens.row
+        self.col = tokens.col
+        log.debug('parsed %r as Excel_Expression' % self)
+
+    def __repr__(self):
+        return "[" + str(self.row) + ":" + str(self.col) + "]"
+
+    def eval(self, context, params=None):
+        # TODO: Not sure how to handle this. For now do nothing.
+        return "NULL"
+    
+# ex. [A:B]
+excel_expression <<= Suppress(Literal("[")) + lex_identifier("row") + Suppress(Literal(":")) + lex_identifier("col") + Suppress(Literal("]"))
+excel_expression.setParseAction(Excel_Expression)
