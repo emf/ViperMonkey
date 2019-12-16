@@ -725,7 +725,13 @@ def process_file(container,
         colorlog.basicConfig(level=logging.DEBUG, format='%(log_color)s%(levelname)-8s %(message)s')
     elif set_log:
         colorlog.basicConfig(level=logging.INFO, format='%(log_color)s%(levelname)-8s %(message)s')
-        
+
+    # Check for files that do not exist.
+    if (isinstance(data, Exception)):
+        log.error("Cannot open file '" + str(filename) + "'.")
+        return None
+    
+    # Read in file contents if we have not already been provided data to analyze.
     if not data:
         # TODO: replace print by writing to a provided output file (sys.stdout by default)
         if container:
@@ -736,8 +742,13 @@ def process_file(container,
         print('FILE:', display_filename)
         # FIXME: the code below only works if the file is on disk and not in a zip archive
         # TODO: merge process_file and _process_file
-        with open(filename,'rb') as input_file:
+        try:
+            input_file = open(filename,'rb')
             data = input_file.read()
+            input_file.close()
+        except IOError as e:
+            log.error("Cannot open file '" + str(filename) + "'. " + str(e))
+            return None
     r = _process_file(filename, data, altparser=altparser, strip_useless=strip_useless,
                       entry_points=entry_points, time_limit=time_limit, display_int_iocs=display_int_iocs,
                       artifact_dir=artifact_dir)
@@ -1109,13 +1120,29 @@ def _process_file (filename,
             for (var_name, var_val) in object_data:
                 vm.doc_vars[var_name.lower()] = var_val
                 log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (var_name, var_val))
+
                 tmp_var_name = "ActiveDocument." + var_name
                 vm.doc_vars[tmp_var_name.lower()] = var_val
                 log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+
                 tmp_var_name = var_name + ".Text"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
                 log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                 tmp_var_name = var_name + ".Caption"
+                vm.doc_vars[tmp_var_name.lower()] = var_val
+                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                tmp_var_name = var_name + ".ControlTipText"
+                vm.doc_vars[tmp_var_name.lower()] = var_val
+                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+
+                var_name = "me." + var_name
+                tmp_var_name = var_name + ".Text"
+                vm.doc_vars[tmp_var_name.lower()] = var_val
+                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                tmp_var_name = var_name + ".Caption"
+                vm.doc_vars[tmp_var_name.lower()] = var_val
+                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                tmp_var_name = var_name + ".ControlTipText"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
                 log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                     
