@@ -133,7 +133,10 @@ from core.logger import log
 # === MAIN (for tests) ===============================================================================================
 
 def _read_doc_text_libreoffice(data):
-
+    """
+    Returns a tuple containing the doc text and a list of tuples containing dumped tables.
+    """
+    
     # Don't try this if it is not an Office file.
     if (not filetype.is_office_file(data, True)):
         log.warning("The file is not an Office file. Not extracting document text with LibreOffice.")
@@ -148,14 +151,14 @@ def _read_doc_text_libreoffice(data):
     # Dump all the text using soffice.
     output = None
     try:
-        output = subprocess.check_output([_thismodule_dir + "/export_doc_text.py", out_dir])
+        output = subprocess.check_output(["python3", _thismodule_dir + "/export_doc_text.py",
+                                          "--text", "-f", out_dir])
     except Exception as e:
         log.error("Running export_doc_text.py failed. " + str(e))
         os.remove(out_dir)
         return None
 
     # Read the paragraphs from the converted text file.
-    os.remove(out_dir)
     r = []
     for line in output.split("\n"):
         r.append(line)
@@ -180,19 +183,30 @@ def _read_doc_text_libreoffice(data):
         if (first_line.startswith("[]*")):
             first_line = "/*" + first_line
         r = [first_line] + r[1:]
-                
-    # Return the paragraph text.
-    return r
+
+    # Dump all the tables using soffice.
+    output = None
+    try:
+        output = subprocess.check_output(["python3", _thismodule_dir + "/export_doc_text.py",
+                                          "--tables", "-f", out_dir])
+    except Exception as e:
+        log.error("Running export_doc_text.py failed. " + str(e))
+        os.remove(out_dir)
+        return None
+
+    # Convert the text to a python list.
+    r1 = []
+    if (len(output.strip()) > 0):
+        r1 = json.loads(output)
+    
+    # Return the paragraph text and table text.
+    os.remove(out_dir)
+    return (r, r1)
 
 def _read_doc_text_strings(data):
     """
-    Use a heuristic to read in the document text. The current
-    heuristic (basically run strings on the document file) is not
-    good, so this function is a placeholder until Python support for
-    reading in the document text is found.
-
-    TODO: Replace this when a real Python solution for reading the doc
-    text is found.
+    Use a heuristic to read in the document text. This is used as a fallback if reading
+    the text with libreoffice fails.
     """
 
     # Pull strings from doc.
@@ -201,8 +215,8 @@ def _read_doc_text_strings(data):
     for s in str_list:
         r.append(s)
     
-    # Return all the strings.
-    return r
+    # Return all the doc text strings and an empty list of table data.
+    return (r, [])
 
 def _read_doc_text(fname, data=None):
     """
@@ -227,6 +241,7 @@ def _read_doc_text(fname, data=None):
     # LibreOffice might not be installed or this is not a Word doc. Punt and
     # just pull strings from the file.
     r = _read_doc_text_strings(data)
+
     return r
 
 def _get_inlineshapes_text_values(data):
@@ -831,7 +846,7 @@ def load_excel_libreoffice(data):
     # Dump all the sheets as CSV files using soffice.
     output = None
     try:
-        output = subprocess.check_output([_thismodule_dir + "/export_all_excel_sheets.py", out_dir])
+        output = subprocess.check_output(["python3", _thismodule_dir + "/export_all_excel_sheets.py", out_dir])
     except Exception as e:
         log.error("Running export_all_excel_sheets.py failed. " + str(e))
         os.remove(out_dir)
@@ -1165,9 +1180,10 @@ def _process_file (filename,
                 log.debug("Added potential VBA object caption text %r = %r to doc_vars." % (caption_name, caption_val))
                 
             # Pull out the document text.
-            log.info("Reading document text...")
-            vm.doc_text = _read_doc_text('', data=data)
-            #print "\n\nDOC TEXT:\n" + str(vm.doc_text)
+            log.info("Reading document text and tables...")
+            vm.doc_text, vm.doc_tables = _read_doc_text('', data=data)
+            #print("\n\nDOC TEXT:\n" + str(vm.doc_text))
+            #print("\n\nDOC TABLES:\n" + str(vm.doc_tables))
 
             log.info("Reading form variables...")
             try:
@@ -1338,9 +1354,11 @@ def _process_file (filename,
             print('\nRecorded Actions:')
             print(vm.dump_actions())
             print('')
+            full_iocs = vba_context.intermediate_iocs
+            full_iocs = full_iocs.union(read_ole_fields.pull_base64(data))
             tmp_iocs = []
-            if (len(vba_context.intermediate_iocs) > 0):
-                tmp_iocs = _remove_duplicate_iocs(vba_context.intermediate_iocs)
+            if (len(full_iocs) > 0):
+                tmp_iocs = _remove_duplicate_iocs(full_iocs)
                 if (display_int_iocs):
                     print('Intermediate IOCs:')
                     print('')
@@ -1372,8 +1390,7 @@ def _process_file (filename,
 
                 try:
                     with open(out_file_name, 'w') as out_file:
-                        out_file.write(json.dumps(out_data, indent=4))
-                        log.info("Saved results JSON to output file " + out_file_name)
+                        out_file.write("\n" + json.dumps(out_data, indent=4))
                 except Exception as exc:
                     log.error("Failed to output results to output file. " + str(exc))
 
@@ -1552,11 +1569,14 @@ def main():
     # setup logging to the console
     # logging.basicConfig(level=LOG_LEVELS[options.loglevel], format='%(levelname)-8s %(message)s')
     colorlog.basicConfig(level=LOG_LEVELS[options.loglevel], format='%(log_color)s%(levelname)-8s %(message)s')
-    
+
+    json_results = []
+
     for container, filename, data in xglob.iter_files(args,
                                                       recursive=options.recursive,
                                                       zip_password=options.zip_password,
                                                       zip_fname=options.zip_fname):
+
         # ignore directory names stored in zip files:
         if container and filename.endswith('/'):
             continue
@@ -1575,6 +1595,20 @@ def main():
                          time_limit=options.time_limit,
                          display_int_iocs=options.display_int_iocs,
                          out_file_name=options.out_file)
+
+            # add json results to list
+            if (options.out_file):
+                with open(options.out_file, 'r') as json_file:
+                    json_results.append(json.loads(json_file.read()))
+
+    if (options.out_file):
+        with open(options.out_file, 'w') as json_file:
+            if (len(json_results) > 1):
+                json_file.write(json.dumps(json_results, indent=2))
+            else:
+                json_file.write(json.dumps(json_results[0], indent=2))
+
+        log.info("Saved results JSON to output file " + options.out_file)
 
 if __name__ == '__main__':
     main()

@@ -3334,7 +3334,14 @@ class Context(object):
         # Dump the file.
         try:
             # Get a unique name for the file.
-            fname = fname.replace("\x00", "")
+            fname = re.sub(r"[^ -~]", "__", fname)
+            if ("/" in fname):
+                fname = fname[fname.rindex("/") + 1:]
+            if ("\\" in fname):
+                fname = fname[fname.rindex("\\") + 1:]
+            fname = fname.replace("\x00", "").replace("..", "")
+            if (fname.startswith(".")):
+                fname = "_dot_" + fname[1:]
             file_path = os.path.join(out_dir, os.path.basename(fname))
             orig_file_path = file_path
             count = 0
@@ -3623,7 +3630,7 @@ class Context(object):
         # convert to lowercase
         if (case_insensitive):
             tmp_name = name.lower()
-            self.set(tmp_name, value, var_type, do_with_prefix, force_local, force_global, no_conversion, case_insensitive=False)
+            self.set(tmp_name, value, var_type, do_with_prefix, force_local, force_global, no_conversion=no_conversion, case_insensitive=False)
         
         # Set the variable
         if (force_global):
@@ -3741,10 +3748,10 @@ class Context(object):
                     log.error("base64 conversion of '" + str(value) + "' failed. " + str(e))
 
         # Handle hex conversion with VBA objects.
-        if (name.endswith(".nodetypedvalue")):
+        if (name.lower().endswith(".nodetypedvalue")):
 
             # Handle doing conversions on the data.
-            node_type = name.replace(".nodetypedvalue", ".datatype")
+            node_type = name[:name.rindex(".")] + ".datatype"
             try:
 
                 # Something set to type "bin.hex"?

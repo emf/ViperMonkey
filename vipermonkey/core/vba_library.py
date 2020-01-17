@@ -380,7 +380,7 @@ class Len(VbaLibraryFunc):
 
     def eval(self, context, params=None):
         if (isinstance(params[0], int)):
-            return 2
+            return len(str(params[0]))
         val = str_convert(params[0])
         if (hasattr(params[0], '__len__')):
 
@@ -1335,9 +1335,12 @@ class Replace(VbaLibraryFunc):
             if (pat.strip() != "."):
                 try:
                     pat1 = pat.replace("$", "\\$").replace("-", "\\-")
+                    fix_dash_pat = r"(\[.\w+)\\\-(\w+\])"
+                    pat1 = re.sub(fix_dash_pat, r"\1-\2", pat1)
                     rep = re.sub(r"\$(\d)", r"\\\1", rep)
                     r = re.sub(pat1, rep, string)
-                except:
+                except Exception as e:
+                    log.error("Regex replace " + str(params) + " failed. " + str(e))
                     r = string
 
         # Regular string replacement?
@@ -1714,7 +1717,15 @@ class Hex(VbaLibraryFunc):
         r = ''
         try:
             num = int_convert(params[0])
+            # Number treated as an unsigned int by VBA.
+            if (num < 0):
+                num += (1 << 32)
             r = hex(num).replace("0x","").upper()
+            # VBA chops FFs from the start of the string down to 1 FF.
+            if (r.startswith("FF")):
+                r = "FF" + r[r.rindex("FF") + len("FF"):]
+                if ((len(r) % 2) != 0):
+                    r = "F" + r
         except:
             pass
         log.debug("Hex: %r returns %r" % (self, r))

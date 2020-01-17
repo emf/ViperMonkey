@@ -48,6 +48,16 @@ import olefile
 from logger import log
 import filetype
 
+def pull_base64(data):
+    """
+    Pull base64 strings from some data.
+    """
+
+    # Pull out strings that might be base64.
+    base64_pat_loose = r"[A-Za-z0-9+/=]{40,}"
+    r = set(re.findall(base64_pat_loose, data))
+    return r
+
 def unzip_data(data):
     """
     Unzip zipped data in memory.
@@ -202,6 +212,35 @@ def entropy(text):
     infoc*=-1
     return infoc
 
+# There is some MS cruft strings that should be eliminated from the
+# strings pulled from the chunk.
+cruft_pats = [r'Microsoft Forms 2.0 Form',
+              r'Embedded Object',
+              r'CompObj',
+              r'VBFrame',
+              r'VERSION [\d\.]+\r\nBegin {[\w\-]+} \w+ \r\n\s+Caption\s+=\s+"UserForm1"\r\n\s+ClientHeight\s+=\s+\d+\r\n\s+ClientLeft\s+=\s+\d+\r\n\s+ClientTop\s+=\s+\d+\r\n\s+ClientWidth\s+=\s+\d+\r\n\s+StartUpPosition\s+=\s+\d+\s+\'CenterOwner\r\n\s+TypeInfoVer\s+=\s+\d+\r\nEnd\r\n',
+              r'DEFAULT',
+              r'InkEdit\d+',
+              r'MS Sans Serif',
+              r'\{\\rtf1\\ansi\\ansicpg\d+\\deff\d+\\deflang\d+\{\\fonttbl\{\\f\d+\\f\w+\\fcharset\d+.+;\}\}',
+              r'{\\\*\\generator [\w\d\. ]+;}\\[\d\w]+\\[\d\w]+\\[\d\w]+\\[\d\w]+\\[\d\w]+ ',
+              r'\\par',
+              r'HelpContextID="\d+"',
+              r'VersionCompatible\d+="\d+"',
+              r'CMG="[A-Z0-9]+"',
+              r'DPB="[A-Z0-9]+"',
+              r'GC="[A-Z0-9]+"',
+              r'\[Host Extender Info\]',
+              r'&H\d+=\{[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\};VBE;&H\d+',
+              r'&H\d+=\{[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\-[A-Z0-9]+\};Word\d.\d;&H\d+',
+              r'\[Workspace\]',
+              r'http://schemas.openxmlformats.org/\w+/\w+/\w+',
+              r'Root Entry',
+              r'Data',
+              r'WordDocument',
+              r'ObjectPool',
+]
+    
 def get_ole_textbox_values2(data, debug, vba_code):
     """
     Read in the text associated with embedded OLE form textbox objects.
@@ -240,7 +279,7 @@ def get_ole_textbox_values2(data, debug, vba_code):
     if (len(chunk) == 0):
 
         # Try a different chunk start marker.
-        chunk_pat = r'\x00V\x00B\x00F\x00r\x00a\x00m\x00e\x00(.*)(?:(?:Microsoft Forms 2.0 Form)|(?:ID="{))'
+        chunk_pat = r'\x00V\x00B\x00F\x00r\x00a\x00m\x00e\x00(.*)(?:(?:Microsoft Forms 2.0 (?:Form|Frame))|(?:ID="{))'
         chunk = re.findall(chunk_pat, data, re.DOTALL)
 
         # Did we find the value chunk?
@@ -257,21 +296,6 @@ def get_ole_textbox_values2(data, debug, vba_code):
     if debug:
         print "\nChunk:"
         print chunk
-    
-    # There is some MS cruft strings that should be eliminated from the
-    # strings pulled from the chunk.
-    cruft_pats = [r'Microsoft Forms 2.0 Form',
-                  r'Embedded Object',
-                  r'CompObj',
-                  r'VBFrame',
-                  r'VERSION [\d\.]+\r\nBegin {[\w\-]+} \w+ \r\n\s+Caption\s+=\s+"UserForm1"\r\n\s+ClientHeight\s+=\s+\d+\r\n\s+ClientLeft\s+=\s+\d+\r\n\s+ClientTop\s+=\s+\d+\r\n\s+ClientWidth\s+=\s+\d+\r\n\s+StartUpPosition\s+=\s+\d+\s+\'CenterOwner\r\n\s+TypeInfoVer\s+=\s+\d+\r\nEnd\r\n',
-                  r'DEFAULT',
-                  r'InkEdit\d+',
-                  r'MS Sans Serif',
-                  r'\{\\rtf1\\ansi\\ansicpg\d+\\deff\d+\\deflang\d+\{\\fonttbl\{\\f\d+\\f\w+\\fcharset\d+.+;\}\}',
-                  r'{\\\*\\generator [\w\d\. ]+;}\\[\d\w]+\\[\d\w]+\\[\d\w]+\\[\d\w]+\\[\d\w]+ ',
-                  r'\\par'
-    ]
     
     # Pull out the strings from the value chunk.
     ascii_pat = r"(?:(?:[\x20-\x7f]|\x0d\x0a){4,})|(?:(?:[\x20-\x7f]\x00){4,})"
@@ -468,7 +492,6 @@ def get_ole_textbox_values2(data, debug, vba_code):
     if debug:
         print "\nRESULTS VALUES2:"
         print r
-        sys.exit(0)
     return r
 
 def get_ole_textbox_values1(data, debug):
@@ -1112,7 +1135,17 @@ def get_ole_textbox_values(obj, vba_code):
     r = tmp
     if (len(r) == 0):
         r = v2_vals
-    
+
+    # Eliminate cruft in values.
+    tmp_r = []
+    for old_pair in r:
+        name = old_pair[0]
+        val = old_pair[1]
+        for cruft_pat in cruft_pats:
+            val = re.sub(cruft_pat, "", val)
+        tmp_r.append((name, val))
+    r = tmp_r
+        
     # Return the OLE form textbox information.
     if debug:
         print "\nFINAL RESULTS:" 
@@ -1399,19 +1432,24 @@ def _get_comments_2007(fname):
         curr_id = ids[0]
 
         # Pull out the comment text.
-        text_pat = r"<w:t>([^<]+)</w:t>"
+        text_pat = r"<w:t[^>]*>([^<]+)</w:t>"
         texts = re.findall(text_pat, block)
         if (len(texts) == 0):
             continue
-        text = texts[0]
-        text = text.replace("&amp;", "&")
-        text = text.replace("&gt;", ">")
-        text = text.replace("&lt;", "<")
-        text = text.replace("&apos;", "'")
-        text = text.replace("&quot;", '"')
+
+        block_text = ""
+
+        for text in texts:
+            text = text.replace("&amp;", "&")
+            text = text.replace("&gt;", ">")
+            text = text.replace("&lt;", "<")
+            text = text.replace("&apos;", "'")
+            text = text.replace("&quot;", '"')
+            block_text += text
+
 
         # Save the comment.
-        r.append((curr_id, text))
+        r.append((curr_id, block_text))
         
     # Done.
     unzipped_data.close()
