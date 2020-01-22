@@ -1,4 +1,4 @@
-oletools
+oletools==0.55.dev3
 olefile
 prettytable
 colorlog

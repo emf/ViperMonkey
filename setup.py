@@ -52,7 +52,7 @@ setup(
         # => on PyPy, pin to oletools 0.54.1:
         'oletools==0.54.1; platform_python_implementation=="PyPy"',
         # => Otherwise, use the latest oletools:
-        'oletools; platform_python_implementation!="PyPy"',
+        'oletools==0.55.dev3; platform_python_implementation!="PyPy"',
         "olefile",
         "prettytable",
         "colorlog",
