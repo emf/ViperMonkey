@@ -137,6 +137,9 @@ def _read_doc_text_libreoffice(data):
     Returns a tuple containing the doc text and a list of tuples containing dumped tables.
     """
     
+    # emf - we dont have libreoffice and we dont want it as a dependency. this entire function is asking for trouble.
+    return None
+
     # Don't try this if it is not an Office file.
     if (not filetype.is_office_file(data, True)):
         log.warning("The file is not an Office file. Not extracting document text with LibreOffice.")
@@ -831,7 +834,8 @@ def read_sheet_from_csv(filename):
     return r
 
 def load_excel_libreoffice(data):
-
+    # emf - no.
+    return None
     # Don't try this if it is not an Office file.
     if (not filetype.is_office_file(data, True)):
         log.warning("The file is not an Office file. Not extracting sheets with LibreOffice.")
