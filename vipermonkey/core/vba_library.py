@@ -1198,7 +1198,7 @@ class Split(VbaLibraryFunc):
             return ""
         assert len(params) > 0
         # TODO: Actually implement this properly.
-        string = str(params[0])
+        string = "".join([c for c in params[0] if ord(c)<128])
         sep = " "
         if ((len(params) > 1) and
             (isinstance(params[1], str)) and
@@ -2875,7 +2875,7 @@ class CreateObject(VbaLibraryFunc):
         assert (len(params) >= 1)
         
         # Track contents of data written to 'ADODB.Stream'.
-        obj_type = str(params[0])
+        obj_type = "".join([c for c in params[0] if ord(c)<128])
         if (obj_type == 'ADODB.Stream'):
             context.open_file('ADODB.Stream')
 
