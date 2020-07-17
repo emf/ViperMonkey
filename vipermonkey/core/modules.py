@@ -44,11 +44,14 @@ __version__ = '0.02'
 
 # --- IMPORTS ------------------------------------------------------------------
 
+import logging
+
 from comments_eol import *
 from procedures import *
 from statements import *
 import vba_context
 from function_defn_visitor import *
+from vba_object import to_python
 
 from logger import log
 
@@ -75,19 +78,24 @@ class Module(VBA_Object):
         for token in tokens:
             if isinstance(token, If_Statement_Macro):
                 for n in token.external_functions.keys():
-                    log.debug("saving external func decl: %r" % n)
+                    if (log.getEffectiveLevel() == logging.DEBUG):
+                        log.debug("saving external func decl: %r" % n)
                     self.external_functions[n] = token.external_functions[n]
             if isinstance(token, Sub):
-                log.debug("saving sub decl: %r" % token.name)
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("saving sub decl: %r" % token.name)
                 self.subs[token.name] = token
             if isinstance(token, Function):
-               log.debug("saving func decl: %r" % token.name)
+               if (log.getEffectiveLevel() == logging.DEBUG):
+                   log.debug("saving func decl: %r" % token.name)
                self.functions[token.name] = token
             if isinstance(token, External_Function):
-                log.debug("saving external func decl: %r" % token.name)
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("saving external func decl: %r" % token.name)
                 self.external_functions[token.name] = token
             elif isinstance(token, Attribute_Statement):
-                log.debug("saving attrib decl: %r" % token.name)
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("saving attrib decl: %r" % token.name)
                 self.attributes[token.name] = token.value
             elif isinstance(token, Global_Var_Statement):
 
@@ -110,13 +118,16 @@ class Module(VBA_Object):
                 # Save those also.
                 for curr_statement in token.block:
                     if isinstance(curr_statement, Sub):
-                        log.debug("saving sub decl: %r" % curr_statement.name)
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("saving sub decl: %r" % curr_statement.name)
                         self.subs[curr_statement.name] = curr_statement
                     if isinstance(curr_statement, Function):
-                        log.debug("saving func decl: %r" % curr_statement.name)
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("saving func decl: %r" % curr_statement.name)
                         self.functions[curr_statement.name] = curr_statement
                     if isinstance(curr_statement, External_Function):
-                        log.debug("saving external func decl: %r" % curr_statement.name)
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("saving external func decl: %r" % curr_statement.name)
                         self.external_functions[curr_statement.name] = curr_statement
                     
         self.name = self.attributes.get('VB_Name', None)
@@ -138,7 +149,8 @@ class Module(VBA_Object):
             if (isinstance(block, Sub) or
                 isinstance(block, Function) or
                 isinstance(block, External_Function)):
-                log.debug("Skip loose line const eval of " + str(block))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Skip loose line const eval of " + str(block))
                 continue
             if (isinstance(block, LooseLines)):
                 context.global_scope = True
@@ -152,7 +164,8 @@ class Module(VBA_Object):
             if (isinstance(block, Sub) or
                 isinstance(block, Function) or
                 isinstance(block, External_Function)):
-                log.debug("Skip loose line eval of " + str(block))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Skip loose line eval of " + str(block))
                 continue
             context.global_scope = True
             block.eval(context, params)
@@ -162,6 +175,9 @@ class Module(VBA_Object):
         # Return if we ran anything.
         return done_emulation
 
+    def to_python(self, context, params=None, indent=0):
+        return to_python(self.loose_lines, context, indent=indent, statements=True)
+    
     def load_context(self, context):
         """
         Load functions/subs defined in the module into the given
@@ -169,20 +185,28 @@ class Module(VBA_Object):
         """
         
         for name, _sub in self.subs.items():
-            log.debug('(1) storing sub "%s" in globals' % name)
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug('(1) storing sub "%s" in globals' % name)
             context.set(name, _sub)
+            context.set(name, _sub, force_global=True)
         for name, _function in self.functions.items():
-            log.debug('(1) storing function "%s" in globals' % name)
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug('(1) storing function "%s" in globals' % name)
             context.set(name, _function)
+            context.set(name, _function, force_global=True)
         for name, _function in self.external_functions.items():
-            log.debug('(1) storing external function "%s" in globals' % name)
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug('(1) storing external function "%s" in globals' % name)
             context.set(name, _function)
         for name, _var in self.global_vars.items():
-            log.debug('(1) storing global var "%s" = %s in globals (1)' % (name, str(_var)))
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug('(1) storing global var "%s" = %s in globals (1)' % (name, str(_var)))
             if (isinstance(name, str)):
                 context.set(name, _var)
+                context.set(name, _var, force_global=True)
             if (isinstance(name, list)):
                 context.set(name[0], _var, var_type=name[1])
+                context.set(name[0], _var, var_type=name[1], force_global=True)
             
 # see MS-VBAL 4.2 Modules
 #
@@ -242,6 +266,9 @@ class LooseLines(VBA_Object):
             s = s[:35] + " ...)"
         return 'Loose Lines Block: %s: %s statement(s)' % (s, len(self.block))
 
+    def to_python(self, context, params=None, indent=0):
+        return to_python(self.block, context, indent=indent, statements=True)
+    
     def eval(self, context, params=None):
 
         # Exit if an exit function statement was previously called.
@@ -260,7 +287,8 @@ class LooseLines(VBA_Object):
             if (isinstance(curr_statement, Sub) or
                 isinstance(curr_statement, Function) or
                 isinstance(curr_statement, External_Function)):
-                log.debug("Skip loose line eval of " + str(curr_statement))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Skip loose line eval of " + str(curr_statement))
                 continue
             
             # Is this something we can emulate?
@@ -277,7 +305,7 @@ class LooseLines(VBA_Object):
         # loop with an error.
         context.handle_error(params)
             
-loose_lines <<= OneOrMore(tagged_block ^ (block_statement + EOS.suppress()))('block')
+loose_lines <<= OneOrMore(simple_call_list ^ tagged_block ^ (block_statement + EOS.suppress()) ^ orphaned_marker)('block')
 loose_lines.setParseAction(LooseLines)
 
 # TODO: add optional empty lines after each sub/function?

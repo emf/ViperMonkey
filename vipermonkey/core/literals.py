@@ -41,6 +41,7 @@ __version__ = '0.02'
 
 # --- IMPORTS ------------------------------------------------------------------
 
+import logging
 import re
 
 from pyparsing import *
@@ -106,6 +107,7 @@ float_literal.setParseAction(lambda t: float(t.value))
 # MS-GRAMMAR: string-character = NO-LINE-CONTINUATION ((double-quote double-quote) termination-character)
 
 class String(VBA_Object):
+
     def __init__(self, original_str, location, tokens):
         super(String, self).__init__(original_str, location, tokens)
         self.value = tokens[0]
@@ -144,18 +146,55 @@ class String(VBA_Object):
         # them breaks decoding, so they are commented out until something else
         # breaks.
         
-        log.debug('parsed "%r" as String' % self)
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug('parsed "%r" as String' % self)
 
     def __repr__(self):
         return str(self.value)
 
     def eval(self, context, params=None):
         r = self.value
-        log.debug("String.eval: return " + r)
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("String.eval: return " + r)
         return r
 
+    def to_python(self, context, params=None, indent=0):
+        # Escape some characters.
+        r = str(self.value).\
+            replace("\\", "\\\\").\
+            replace('"', '\\"').\
+            replace("\n", "\\n").\
+            replace("\t", "\\t").\
+            replace("\r", "\\r")
+        for i in range(0, 9):
+            repl = hex(i).replace("0x", "")
+            if (len(repl) == 1):
+                repl = "0" + repl
+            repl = "\\x" + repl
+            r = r.replace(chr(i), repl)
+        for i in range(11, 13):
+            repl = hex(i).replace("0x", "")
+            if (len(repl) == 1):
+                repl = "0" + repl
+            repl = "\\x" + repl
+            r = r.replace(chr(i), repl)
+        for i in range(14, 32):
+            repl = hex(i).replace("0x", "")
+            if (len(repl) == 1):
+                repl = "0" + repl
+            repl = "\\x" + repl
+            r = r.replace(chr(i), repl)
+        for i in range(127, 255):
+            repl = hex(i).replace("0x", "")
+            if (len(repl) == 1):
+                repl = "0" + repl
+            repl = "\\x" + repl
+            r = r.replace(chr(i), repl)
+        return '"' + r + '"'
+
 # NOTE: QuotedString creates a regex, so speed should not be an issue.
-quoted_string = (QuotedString('"', escQuote='""') | QuotedString("'", escQuote="''"))('value')
+#quoted_string = (QuotedString('"', escQuote='""') | QuotedString("'", escQuote="''"))('value')
+quoted_string = QuotedString('"', escQuote='""')('value')
 quoted_string.setParseAction(String)
 
 quoted_string_keep_quotes = QuotedString('"', escQuote='""', unquoteResults=False)

@@ -90,6 +90,7 @@ import pyparsing
 #ParserElement.enablePackrat(cache_size_limit=None)
 pyparsing.ParserElement.enablePackrat(cache_size_limit=100000)
 
+import logging
 import json
 import random
 import tempfile
@@ -111,7 +112,7 @@ import io
 
 import prettytable
 from oletools.thirdparty.xglob import xglob
-from oletools.olevba import VBA_Parser, filter_vba
+from oletools.olevba import VBA_Parser, filter_vba, FileOpenError
 import olefile
 import xlrd
 
@@ -126,9 +127,13 @@ if not _thismodule_dir in sys.path:
 from core import *
 import core.excel as excel
 import core.read_ole_fields as read_ole_fields
+from core.utils import safe_print
 
 # for logging
 from core.logger import log
+from core.logger import CappedFileHandler
+from logging import LogRecord
+from logging import FileHandler
 
 # === MAIN (for tests) ===============================================================================================
 
@@ -566,27 +571,42 @@ def get_vb_contents(vba_code):
     Pull out Visual Basic code from .hta file contents.
     """
 
-    # Pull out the VB code.
-    pat = r"<\s*[Ss][Cc][Rr][Ii][Pp][Tt]\s+(?:(?:[Ll][Aa][Nn][Gg][Uu][Aa][Gg][Ee])|(?:[Tt][Yy][Pp][Ee]))\s*=\s*\"?.{0,10}[Vv][Bb][Ss][Cc][Rr][Ii][Pp][Tt]\"?\s*>(.{20,})</\s*[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>"
-    code = re.findall(pat, vba_code, re.DOTALL)
-
-    # Did we find any VB code in a script block?
-    #print code
+    # Try several regexes to pull out HTA script contents.
+    hta_regexes = [r"<\s*[Ss][Cc][Rr][Ii][Pp][Tt]\s+(?:(?:[Ll][Aa][Nn][Gg][Uu][Aa][Gg][Ee])|(?:[Tt][Yy][Pp][Ee]))\s*=\s*\"?.{0,10}[Vv][Bb][Ss][Cc][Rr][Ii][Pp][Tt]\"?\s*>(.{20,}?)</\s*[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>",
+                   r"<\s*[Ss][Cc][Rr][Ii][Pp][Tt]\s+\%\d{1,10}\s*>(.{20,}?)</\s*[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>",
+                   r"<\s*[Ss][Cc][Rr][Ii][Pp][Tt]\s+(?:(?:[Ll][Aa][Nn][Gg][Uu][Aa][Gg][Ee])|(?:[Tt][Yy][Pp][Ee]))\s*=\s*\"?.{0,10}[Vv][Bb][Ss][Cc][Rr][Ii][Pp][Tt]\"?\s*>(.{20,})$"]
+    code = []
+    for pat in hta_regexes:
+        code = re.findall(pat, vba_code.strip(), re.DOTALL)
+        if (len(code) > 0):
+            #for c in code:
+            #    print("\n\n%%%%%%%%%%%%%%%%%%%%%%%%%%%\n\n")
+            #    print(c)
+            break
     if (len(code) == 0):
-
-        # Try a different sort of tag.
-        pat = r"<\s*[Ss][Cc][Rr][Ii][Pp][Tt]\s+\%\d{1,10}\s*>(.{20,})</\s*[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>"
-        code = re.findall(pat, vba_code, re.DOTALL)
-        if (len(code) == 0):
-            return vba_code
+        return vba_code        
 
     # We have script block VB code.    
     
-    # Return the code.
+    # Return the code.    
     r = ""
     for b in code:
-        if ("</script>" in b):
-            b = b[:b.index("</script>")]
+        b = b.strip()
+        if ("</script>" in b.lower()):
+            b = b[:b.lower().index("</script>")]
+        if ("<![CDATA[" in b.upper()):
+            b = b[b.upper().index("<![CDATA[") + len("<![CDATA["):]
+            if ("]]>" in b[-10:]):
+                b = b[:b.rindex("]]>")]
+
+        # More tag stripping.
+        pat = r"<!\-\-(.+)/?/?\-\->"
+        tmp_b = re.findall(pat, b, re.DOTALL)
+        if (len(tmp_b) > 0):
+            b = tmp_b[0].strip()
+        if (b.endswith("//")):
+            b = b[:-2]
+                
         r += b + "\n"
     return r
     
@@ -620,34 +640,38 @@ def parse_stream(subfilename,
     # .hta file).
     vba_code = get_vb_contents(vba_code)
 
+    # Do not analyze the file if the VBA looks like garbage characters.
+    if (read_ole_fields.is_garbage_vba(vba_code)):
+        raise ValueError("VBA looks corrupted. Not analyzing.")
+    
     # Strip out code that does not affect the end result of the program.
     if (strip_useless):
         vba_code = strip_lines.strip_useless_code(vba_code, local_funcs)
-    print('-'*79)
-    print('VBA MACRO %s ' % vba_filename)
-    print('in file: %s - OLE stream: %s' % (subfilename, repr(stream_path)))
-    print('- '*39)
+    safe_print('-'*79)
+    safe_print('VBA MACRO %s ' % vba_filename)
+    safe_print('in file: %s - OLE stream: %s' % (subfilename, repr(stream_path)))
+    safe_print('- '*39)
     
     # Parse the macro.
     m = None
     if vba_code.strip() == '':
-        print('(empty macro)')
+        safe_print('(empty macro)')
         m = "empty"
     else:
-        print('-'*79)
-        print('VBA CODE (with long lines collapsed):')
-        print(vba_code)
-        print('-'*79)
+        safe_print('-'*79)
+        safe_print('VBA CODE (with long lines collapsed):')
+        safe_print(vba_code)
+        safe_print('-'*79)
         #sys.exit(0)
-        print('PARSING VBA CODE:')
+        safe_print('PARSING VBA CODE:')
         try:
             m = module.parseString(vba_code + "\n", parseAll=True)[0]
             ParserElement.resetCache()
             m.code = vba_code
         except ParseException as err:
-            print(err.line)
-            print(" "*(err.column-1) + "^")
-            print(err)
+            safe_print(err.line)
+            safe_print(" "*(err.column-1) + "^")
+            safe_print(err)
             log.error("Parse Error. Processing Aborted.")
             return None
 
@@ -725,6 +749,29 @@ def parse_streams(vba, strip_useless=False):
     else:
         return parse_streams_serial(vba, strip_useless)
 
+# === Top level utility functions ================================================================================
+
+def read_excel_sheets(fname):
+    """
+    Read all the sheets of a given Excel file as CSV and return them as a ExcelBook object. 
+    Returns None on error.
+    """
+
+    # Read the sheets.
+    try:
+        f = open(fname, 'rb')
+        data = f.read()
+        f.close()
+        return load_excel_libreoffice(data)
+    except:
+        return None
+
+def pull_urls_office97(fname):
+    """
+    Pull URLs directly from an Office97 file.
+    """
+    return read_ole_fields.pull_urls_office97(fname, False, None)
+    
 # === Top level Programatic Interface ================================================================================    
 
 def process_file(container,
@@ -737,13 +784,37 @@ def process_file(container,
                  verbose=False,
                  display_int_iocs=False,
                  set_log=False,
+                 tee_log=False,
+                 tee_bytes=0,
                  artifact_dir=None,
-                 out_file_name=None):
+                 out_file_name=None,
+                 do_jit=False):
 
+    # set logging level
     if verbose:
         colorlog.basicConfig(level=logging.DEBUG, format='%(log_color)s%(levelname)-8s %(message)s')
     elif set_log:
         colorlog.basicConfig(level=logging.INFO, format='%(log_color)s%(levelname)-8s %(message)s')
+
+    # assume they want a tee'd file if they give bytes for it
+    if tee_bytes > 0:
+        tee_log = True
+
+    # add handler for tee'd log file
+    if tee_log:
+
+        tee_filename = "./" + filename
+        if ("/" in filename):
+            tee_filename = "./" + filename[filename.rindex("/") + 1:]
+
+        if tee_bytes > 0:
+            capped_handler = CappedFileHandler(tee_filename + ".log", sizecap=tee_bytes)
+            capped_handler.setFormatter(logging.Formatter("%(levelname)-8s %(message)s"))
+            log.addHandler(capped_handler)
+        else:
+            file_handler = FileHandler(tee_filename + ".log", mode="w")
+            file_handler.setFormatter(logging.Formatter("%(levelname)-8s %(message)s"))
+            log.addHandler(file_handler)
 
     # Check for files that do not exist.
     if (isinstance(data, Exception)):
@@ -757,8 +828,8 @@ def process_file(container,
             display_filename = '%s in %s' % (filename, container)
         else:
             display_filename = filename
-        print('='*79)
-        print('FILE:', display_filename)
+        safe_print('='*79)
+        safe_print('FILE: ' + str(display_filename))
         # FIXME: the code below only works if the file is on disk and not in a zip archive
         # TODO: merge process_file and _process_file
         try:
@@ -770,7 +841,7 @@ def process_file(container,
             return None
     r = _process_file(filename, data, altparser=altparser, strip_useless=strip_useless,
                       entry_points=entry_points, time_limit=time_limit, display_int_iocs=display_int_iocs,
-                      artifact_dir=artifact_dir, out_file_name=out_file_name)
+                      artifact_dir=artifact_dir, out_file_name=out_file_name, do_jit=do_jit)
 
     # Reset logging.
     colorlog.basicConfig(level=logging.ERROR, format='%(log_color)s%(levelname)-8s %(message)s')
@@ -901,13 +972,18 @@ def load_excel_libreoffice(data):
     # Delete the temp files with the CSV sheet data.
     for sheet_file in sheet_files:
         os.remove(sheet_file)
+
+    # Delete the temporary Excel file.
+    if os.path.isfile(out_dir):
+        os.remove(out_dir)
         
     # Return the workbook.
     return result_book
         
 def load_excel_xlrd(data):
     try:
-        log.debug("Trying to load with xlrd...")
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("Trying to load with xlrd...")
         r = xlrd.open_workbook(file_contents=data)
         return r
     except Exception as e:
@@ -993,7 +1069,8 @@ def _process_file (filename,
                    time_limit=None,
                    display_int_iocs=False,
                    artifact_dir=None,
-                   out_file_name=None):
+                   out_file_name=None,
+                   do_jit=False):
     """
     Process a single file
 
@@ -1015,7 +1092,7 @@ def _process_file (filename,
 
     # Create the emulator.
     log.info("Starting emulation...")
-    vm = ViperMonkey(filename, data)
+    vm = ViperMonkey(filename, data, do_jit=do_jit)
     orig_filename = filename
     if (entry_points is not None):
         for entry_point in entry_points:
@@ -1024,7 +1101,21 @@ def _process_file (filename,
         #TODO: handle olefile errors, when an OLE file is malformed
         if (isinstance(data, Exception)):
             data = None
-        vba = _get_vba_parser(data)
+        vba = None
+        try:
+            vba = _get_vba_parser(data)
+        except FileOpenError as e:
+
+            # Is this an unrecognized format?
+            if ("Failed to open file  is not a supported file type, cannot extract VBA Macros." not in str(e)):
+
+                # No, it is some other problem. Pass on the exception.
+                raise e
+
+            # This may be VBScript with some null characters. Remove those and try again.
+            data = data.replace("\x00", "")
+            vba = _get_vba_parser(data)
+            
         if vba.detect_vba_macros():
 
             # Read in document metadata.
@@ -1052,7 +1143,7 @@ def _process_file (filename,
             # the macros.
             out_dir = None
             if (only_filename is not None):
-                out_dir = artifact_dir + only_filename + "_artifacts/"
+                out_dir = artifact_dir + "/" + only_filename + "_artifacts/"
             else:
                 out_dir = "/tmp/tmp_file_" + str(random.randrange(0, 10000000000))
             log.info("Saving dropped analysis artifacts in " + out_dir)
@@ -1072,9 +1163,11 @@ def _process_file (filename,
             log.info("Reading document variables...")
             for (var_name, var_val) in _read_doc_vars(data, orig_filename):
                 vm.doc_vars[var_name] = var_val
-                log.debug("Added potential VBA doc variable %r = %r to doc_vars." % (var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA doc variable %r = %r to doc_vars." % (var_name, var_val))
                 vm.doc_vars[var_name.lower()] = var_val
-                log.debug("Added potential VBA doc variable %r = %r to doc_vars." % (var_name.lower(), var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA doc variable %r = %r to doc_vars." % (var_name.lower(), var_val))
 
             # Pull text associated with document comments.
             log.info("Reading document comments...")
@@ -1095,27 +1188,35 @@ def _process_file (filename,
                 got_it = True
                 var_name = var_name.lower()
                 vm.doc_vars[var_name] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (var_name, var_val))
                 vm.doc_vars["thisdocument."+var_name] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("thisdocument."+var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("thisdocument."+var_name, var_val))
                 vm.doc_vars["thisdocument."+var_name+".caption"] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("thisdocument."+var_name+".caption", var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("thisdocument."+var_name+".caption", var_val))
                 vm.doc_vars["activedocument."+var_name] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("activedocument."+var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("activedocument."+var_name, var_val))
                 vm.doc_vars["activedocument."+var_name+".caption"] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("activedocument."+var_name+".caption", var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % ("activedocument."+var_name+".caption", var_val))
                 tmp_name = "shapes('" + var_name + "').textframe.textrange.text"
                 vm.doc_vars[tmp_name] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (tmp_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (tmp_name, var_val))
                 tmp_name = "shapes('" + str(pos) + "').textframe.textrange.text"
                 vm.doc_vars[tmp_name] = var_val
-                log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (tmp_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (tmp_name, var_val))
                 pos += 1
             if (not got_it):
                 shape_text = read_ole_fields._get_shapes_text_values(data, '1table')
                 for (var_name, var_val) in shape_text:
                     vm.doc_vars[var_name.lower()] = var_val
-                    log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (var_name, var_val))
+                    if (log.getEffectiveLevel() == logging.DEBUG):
+                        log.debug("Added potential VBA Shape text %r = %r to doc_vars." % (var_name, var_val))
 
             # Pull text associated with InlineShapes() objects.
             log.info("Reading InlineShapes object text fields...")
@@ -1132,7 +1233,12 @@ def _process_file (filename,
             # Get the VBA code.
             vba_code = ""
             for (subfilename, stream_path, vba_filename, macro_code) in vba.extract_macros():
-                vba_code += macro_code
+                if (macro_code is not None):
+                    vba_code += macro_code
+
+            # Do not analyze the file if the VBA looks like garbage characters.
+            if (read_ole_fields.is_garbage_vba(vba_code)):
+                raise ValueError("VBA looks corrupted. Not analyzing.")
                     
             # Pull out embedded OLE form textbox text.
             log.info("Reading TextBox and RichEdit object text fields...")
@@ -1140,48 +1246,59 @@ def _process_file (filename,
             object_data.extend(read_ole_fields.get_msftedit_variables(data))
             for (var_name, var_val) in object_data:
                 vm.doc_vars[var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (var_name, var_val))
 
                 tmp_var_name = "ActiveDocument." + var_name
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
 
                 tmp_var_name = var_name + ".Text"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                 tmp_var_name = var_name + ".Caption"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                 tmp_var_name = var_name + ".ControlTipText"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
 
                 var_name = "me." + var_name
                 tmp_var_name = var_name + ".Text"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                 tmp_var_name = var_name + ".Caption"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                 tmp_var_name = var_name + ".ControlTipText"
                 vm.doc_vars[tmp_var_name.lower()] = var_val
-                log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA OLE form textbox text %r = %r to doc_vars." % (tmp_var_name, var_val))
                     
             # Pull out custom document properties.
             log.info("Reading custom document properties...")
             for (var_name, var_val) in _read_custom_doc_props(data):
                 vm.doc_vars[var_name.lower()] = var_val
-                log.debug("Added potential VBA custom doc prop variable %r = %r to doc_vars." % (var_name, var_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA custom doc prop variable %r = %r to doc_vars." % (var_name, var_val))
 
             # Pull text associated with embedded objects.
             log.info("Reading embedded object text fields...")
             for (var_name, caption_val, tag_val) in _get_embedded_object_values(data):
                 tag_name = var_name.lower() + ".tag"
                 vm.doc_vars[tag_name] = tag_val
-                log.debug("Added potential VBA object tag text %r = %r to doc_vars." % (tag_name, tag_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA object tag text %r = %r to doc_vars." % (tag_name, tag_val))
                 caption_name = var_name.lower() + ".caption"
                 vm.doc_vars[caption_name] = caption_val
-                log.debug("Added potential VBA object caption text %r = %r to doc_vars." % (caption_name, caption_val))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added potential VBA object caption text %r = %r to doc_vars." % (caption_name, caption_val))
                 
             # Pull out the document text.
             log.info("Reading document text and tables...")
@@ -1239,19 +1356,26 @@ def _process_file (filename,
                         if ((val == '') and (tag == '') and (caption == '')):
                             continue
                         vm.globals[name] = val
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name, val))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name, val))
                         vm.globals[name + ".tag"] = tag
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Tag", tag))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Tag", tag))
                         vm.globals[name + ".caption"] = caption
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Caption", caption))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Caption", caption))
                         vm.globals[name + ".controltiptext"] = control_tip_text
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".ControlTipText", control_tip_text))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".ControlTipText", control_tip_text))
                         vm.globals[name + ".text"] = val
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Text", val))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Text", val))
                         vm.globals[name + ".value"] = val
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Value", val))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".Value", val))
                         vm.globals[name + ".groupname"] = group_name
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".GroupName", group_name))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name + ".GroupName", group_name))
 
                         # Save control in a list so it can be accessed by index.
                         if ("." in name):
@@ -1272,7 +1396,8 @@ def _process_file (filename,
 
                             # Assuming we are getting these for controls in order, append the current
                             # control information to the list for the form.
-                            log.debug("Added index VBA form control data " + control_name + "(" + str(len(vm.globals[control_name])) + ") = " + str(control_data))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added index VBA form control data " + control_name + "(" + str(len(vm.globals[control_name])) + ") = " + str(control_data))
                             vm.globals[control_name].append(control_data)
                         
                         # Save short form variable names.
@@ -1280,37 +1405,53 @@ def _process_file (filename,
                         if ("." in short_name):
                             short_name = short_name[short_name.rindex(".") + 1:]
                             vm.globals[short_name] = val
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name, val))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name, val))
                             vm.globals[short_name + ".tag"] = tag
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Tag", tag))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Tag", tag))
                             vm.globals[short_name + ".caption"] = caption
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Caption", caption))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Caption", caption))
                             vm.globals[short_name + ".controltiptext"] = control_tip_text
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".ControlTipText", control_tip_text))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".ControlTipText", control_tip_text))
                             vm.globals[short_name + ".text"] = val
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Text", val))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".Text", val))
                             vm.globals[short_name + ".groupname"] = group_name
-                            log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".GroupName", group_name))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (short_name + ".GroupName", group_name))
                 
             except Exception as e:
 
                 # We are not getting variable names this way. Assign wildcarded names that we can use
                 # later to try to heuristically guess form variables.
                 log.warning("Cannot read form strings. " + str(e) + ". Trying fallback method.")
-                traceback.print_exc()
-                sys.exit(0)
+                #traceback.print_exc()
+                #sys.exit(0)
                 try:
                     count = 0
                     skip_strings = ["Tahoma", "Tahomaz"]
                     for (subfilename, stream_path, form_string) in vba.extract_form_strings():
+
+                        # Skip strings that are large and almost all the same character.
+                        if ((len(form_string) > 100) and (read_ole_fields.entropy(form_string) < 1)):
+                            continue
                         # Skip default strings.
                         if (form_string.startswith("\x80")):
                             form_string = form_string[1:]
                         if (form_string in skip_strings):
                             continue
-                        # Skip unprintable strings.
-                        if (not all((ord(c) > 31 and ord(c) < 127) for c in form_string)):
+                        # Skip unprintable strings. Accept < 10% bad chars.
+                        bad_char_count = 0
+                        for c in form_string:
+                            if (not (ord(c) > 31 and ord(c) < 127)):
+                                bad_char_count += 1
+                        if (((bad_char_count + 0.0) / len(form_string)) > .1):
                             continue
+
+                        # String looks good. Keep it.
                         global_var_name = stream_path
                         if ("/" in global_var_name):
                             tmp = global_var_name.split("/")
@@ -1322,20 +1463,41 @@ def _process_file (filename,
                         global_var_name += "*" + str(count)
                         count += 1
                         vm.globals[global_var_name.lower()] = form_string
-                        log.debug("Added VBA form variable %r = %r to globals." % (global_var_name.lower(), form_string))
+                        if (log.getEffectiveLevel() == logging.DEBUG):
+                            log.debug("Added VBA form variable %r = %r to globals." % (global_var_name.lower(), form_string))
                         tmp_name = global_var_name_orig.lower() + ".*"
                         if ((tmp_name not in vm.globals.keys()) or
                             (len(form_string) > len(vm.globals[tmp_name]))):
                             vm.globals[tmp_name] = form_string
-                            log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                            if (log.getEffectiveLevel() == logging.DEBUG):
+                                log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
                             # Probably not right, but needed to handle some maldocs that break olefile.
                             # 16555c7d12dfa6d1d001927c80e24659d683a29cb3cad243c9813536c2f8925e
                             # 99f4991450003a2bb92aaf5d1af187ec34d57085d8af7061c032e2455f0b3cd3
                             # 17005731c750286cae8fa61ce89afd3368ee18ea204afd08a7eb978fd039af68
                             # a0c45d3d8c147427aea94dd15eac69c1e2689735a9fbd316a6a639c07facfbdf
-                            tmp_name = "textbox1"
-                            vm.globals[tmp_name] = form_string
-                            log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                            specific_names = ["textbox1", "label1"]
+                            for specific_name in specific_names:
+                                tmp_name = specific_name
+                                vm.globals[tmp_name] = form_string
+                                if (log.getEffectiveLevel() == logging.DEBUG):
+                                    log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                                tmp_name = specific_name + ".caption"
+                                vm.globals[tmp_name] = form_string
+                                if (log.getEffectiveLevel() == logging.DEBUG):
+                                    log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                                tmp_name = global_var_name_orig.lower() + "." + specific_name + ".caption"
+                                vm.globals[tmp_name] = form_string
+                                if (log.getEffectiveLevel() == logging.DEBUG):
+                                    log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                                tmp_name = specific_name + ".text"
+                                vm.globals[tmp_name] = form_string
+                                if (log.getEffectiveLevel() == logging.DEBUG):
+                                    log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
+                                tmp_name = global_var_name_orig.lower() + "." + specific_name + ".text"
+                                vm.globals[tmp_name] = form_string
+                                if (log.getEffectiveLevel() == logging.DEBUG):
+                                    log.debug("Added VBA form variable %r = %r to globals." % (tmp_name, form_string))
                 except Exception as e:
                     log.error("Cannot read form strings. " + str(e) + ". Fallback method failed.")
 
@@ -1358,35 +1520,44 @@ def _process_file (filename,
                 tmp_name = (stream_name + ".Controls").lower()
                 form_strings = stream_form_map[stream_name]
                 vm.globals[tmp_name] = form_strings
-                log.debug("Added VBA form Control values %r = %r to globals." % (tmp_name, form_strings))
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added VBA form Control values %r = %r to globals." % (tmp_name, form_strings))
 
-            print("")
-            print('-'*79)
-            print('TRACING VBA CODE (entrypoint = Auto*):')
+            # Save DefaultTargetFrame value. This only works for 200+ files.
+            def_targ_frame_val = read_ole_fields.get_defaulttargetframe_text(data)
+            if (def_targ_frame_val is not None):
+                vm.globals["DefaultTargetFrame"] = def_targ_frame_val
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("Added DefaultTargetFrame = " + str(def_targ_frame_val) + " to globals.")
+                
+            safe_print("")
+            safe_print('-'*79)
+            safe_print('TRACING VBA CODE (entrypoint = Auto*):')
             if (entry_points is not None):
                 log.info("Starting emulation from function(s) " + str(entry_points))
+            pyparsing.ParserElement.resetCache()
             vm.vba = vba
             vm.trace()
             # print table of all recorded actions
-            print('\nRecorded Actions:')
-            print(vm.dump_actions())
-            print('')
+            safe_print('\nRecorded Actions:')
+            safe_print(vm.dump_actions())
+            safe_print('')
             full_iocs = vba_context.intermediate_iocs
             full_iocs = full_iocs.union(read_ole_fields.pull_base64(data))
             tmp_iocs = []
             if (len(full_iocs) > 0):
                 tmp_iocs = _remove_duplicate_iocs(full_iocs)
                 if (display_int_iocs):
-                    print('Intermediate IOCs:')
-                    print('')
+                    safe_print('Intermediate IOCs:')
+                    safe_print('')
                     for ioc in tmp_iocs:
-                        print("+---------------------------------------------------------+")
-                        print(ioc)
-                    print("+---------------------------------------------------------+")
-                    print('')
-            print('VBA Builtins Called: ' + str(vm.external_funcs))
-            print('')
-            print('Finished analyzing ' + str(orig_filename) + " .\n")
+                        safe_print("+---------------------------------------------------------+")
+                        safe_print(ioc)
+                    safe_print("+---------------------------------------------------------+")
+                    safe_print('')
+            safe_print('VBA Builtins Called: ' + str(vm.external_funcs))
+            safe_print('')
+            safe_print('Finished analyzing ' + str(orig_filename) + " .\n")
 
             if out_file_name:
 
@@ -1414,9 +1585,9 @@ def _process_file (filename,
             return (vm.actions, vm.external_funcs, tmp_iocs)
 
         else:
-            print('Finished analyzing ' + str(orig_filename) + " .\n")
-            print('No VBA macros found.')
-            print('')
+            safe_print('Finished analyzing ' + str(orig_filename) + " .\n")
+            safe_print('No VBA macros found.')
+            safe_print('')
             return ([], [], [])
     except Exception as e:
         if (("SystemExit" not in str(e)) and (". Aborting analysis." not in str(e))):
@@ -1438,14 +1609,15 @@ def process_file_scanexpr (container, filename, data):
         display_filename = '%s in %s' % (filename, container)
     else:
         display_filename = filename
-    print('='*79)
-    print('FILE:', display_filename)
+    safe_print('='*79)
+    safe_print('FILE: ' + str(display_filename))
     all_code = ''
     try:
         #TODO: handle olefile errors, when an OLE file is malformed
         import oletools
         oletools.olevba.enable_logging()
-        log.debug('opening {}'.format(filename))
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug('opening {}'.format(filename))
         vba = VBA_Parser(filename, data, relaxed=True)
         if vba.detect_vba_macros():
 
@@ -1462,53 +1634,52 @@ def process_file_scanexpr (container, filename, data):
                 # hide attribute lines:
                 #TODO: option to disable attribute filtering
                 vba_code = filter_vba(vba_code)
-                print('-'*79)
-                print('VBA MACRO %s ' % vba_filename)
-                print('in file: %s - OLE stream: %s' % (subfilename, repr(stream_path)))
-                print('- '*39)
+                safe_print('-'*79)
+                safe_print('VBA MACRO %s ' % vba_filename)
+                safe_print('in file: %s - OLE stream: %s' % (subfilename, repr(stream_path)))
+                safe_print('- '*39)
                 # detect empty macros:
                 if vba_code.strip() == '':
-                    print('(empty macro)')
+                    safe_print('(empty macro)')
                 else:
                     # TODO: option to display code
-                    print(vba_code)
+                    safe_print(vba_code)
                     vba_code = vba_collapse_long_lines(vba_code)
                     all_code += '\n' + vba_code
-            print('-'*79)
-            print('EVALUATED VBA EXPRESSIONS:')
+            safe_print('-'*79)
+            safe_print('EVALUATED VBA EXPRESSIONS:')
             t = prettytable.PrettyTable(('Obfuscated expression', 'Evaluated value'))
             t.align = 'l'
             t.max_width['Obfuscated expression'] = 36
             t.max_width['Evaluated value'] = 36
             for expression, expr_eval in scan_expressions(all_code):
                 t.add_row((repr(expression), repr(expr_eval)))
-            print(t)
-
+                safe_print(t)
 
         else:
-            print('No VBA macros found.')
+            safe_print('No VBA macros found.')
     except: #TypeError:
         #raise
         #TODO: print more info if debug mode
         #print sys.exc_value
         # display the exception with full stack trace for debugging, but do not stop:
         traceback.print_exc()
-    print('')
+    safe_print('')
 
 def print_version():
     """
     Print version information.
     """
 
-    print("Version Information:\n")
-    print("Python:\t\t\t" + str(sys.version_info))
+    safe_print("Version Information:\n")
+    safe_print("Python:\t\t\t" + str(sys.version_info))
     import pyparsing
-    print("pyparsing:\t\t" + str(pyparsing.__version__))
+    safe_print("pyparsing:\t\t" + str(pyparsing.__version__))
     import olefile
-    print("olefile:\t\t" + str(olefile.__version__))
+    safe_print("olefile:\t\t" + str(olefile.__version__))
     import oletools.olevba
-    print("olevba:\t\t\t" + str(oletools.olevba.__version__))
-    
+    safe_print("olevba:\t\t\t" + str(oletools.olevba.__version__))
+
 def main():
     """
     Main function, called when vipermonkey is run from the command line
@@ -1519,16 +1690,16 @@ def main():
     
     # print banner with version
     # Generated with http://www.patorjk.com/software/taag/#p=display&f=Slant&t=ViperMonkey
-    print(''' _    ___                 __  ___            __             
+    safe_print(''' _    ___                 __  ___            __             
 | |  / (_)___  ___  _____/  |/  /___  ____  / /_____  __  __
 | | / / / __ \/ _ \/ ___/ /|_/ / __ \/ __ \/ //_/ _ \/ / / /
 | |/ / / /_/ /  __/ /  / /  / / /_/ / / / / ,< /  __/ /_/ / 
 |___/_/ .___/\___/_/  /_/  /_/\____/_/ /_/_/|_|\___/\__, /  
      /_/                                           /____/   ''')
-    print('vmonkey %s - https://github.com/decalage2/ViperMonkey' % __version__)
-    print('THIS IS WORK IN PROGRESS - Check updates regularly!')
-    print('Please report any issue at https://github.com/decalage2/ViperMonkey/issues')
-    print('')
+    safe_print('vmonkey %s - https://github.com/decalage2/ViperMonkey' % __version__)
+    safe_print('THIS IS WORK IN PROGRESS - Check updates regularly!')
+    safe_print('Please report any issue at https://github.com/decalage2/ViperMonkey/issues')
+    safe_print('')
 
     DEFAULT_LOG_LEVEL = "info" # Default log level
     LOG_LEVELS = {
@@ -1557,6 +1728,8 @@ def main():
                       help='Use the alternate line parser (experimental)')
     parser.add_option("-s", '--strip', action="store_true", dest="strip_useless_code",
                       help='Strip useless VB code from macros prior to parsing.')
+    parser.add_option("-j", '--jit', action="store_true", dest="do_jit",
+                      help='Speed up emulation by JIT compilation of VB loops to Python.')
     parser.add_option('-i', '--init', dest="entry_points", action="store", default=None,
                       help="Emulate starting at the given function name(s). Use comma seperated "
                            "list for multiple entries.")
@@ -1569,7 +1742,11 @@ def main():
                       help='Print version information of packages used by ViperMonkey.')
     parser.add_option("-o", "--out-file", action="store", default=None, type="str",
                       help="JSON output file containing resulting IOCs, builtins, and actions")
-    
+    parser.add_option("-p", "--tee-log", action="store_true", default=False,
+                      help="output also to a file in addition to standard out")
+    parser.add_option("-b", "--tee-bytes", action="store", default=0, type="int",
+                      help="number of bytes to limit the tee'd log to")
+
     (options, args) = parser.parse_args()
 
     # Print version information and exit?
@@ -1579,10 +1756,10 @@ def main():
     
     # Print help if no arguments are passed
     if len(args) == 0:
-        print(__doc__)
+        safe_print(__doc__)
         parser.print_help()
         sys.exit(0)
-        
+
     # setup logging to the console
     # logging.basicConfig(level=LOG_LEVELS[options.loglevel], format='%(levelname)-8s %(message)s')
     colorlog.basicConfig(level=LOG_LEVELS[options.loglevel], format='%(log_color)s%(levelname)-8s %(message)s')
@@ -1611,7 +1788,10 @@ def main():
                          entry_points=entry_points,
                          time_limit=options.time_limit,
                          display_int_iocs=options.display_int_iocs,
-                         out_file_name=options.out_file)
+                         tee_log=options.tee_log,
+                         tee_bytes=options.tee_bytes,
+                         out_file_name=options.out_file,
+                         do_jit=options.do_jit)
 
             # add json results to list
             if (options.out_file):

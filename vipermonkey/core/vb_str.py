@@ -40,14 +40,54 @@ https://github.com/decalage2/ViperMonkey
 __version__ = '0.08'
 
 import string
+try:
+    # sudo pypy -m pip install rure
+    import rure as re
+except:
+    import re
 
+def is_wide_str(the_str):
+    """
+    Test to see if the given string is a simple wide char string (every other
+    character is a null byte).
+    """
+    if (len(the_str) < 2):
+        return False
+    if ((len(the_str) % 2) != 0):
+        return False
+    if ('\x00' not in the_str):
+        return False
+    if (the_str.count('\x00') != len(the_str)/2):
+        return False
+    is_wide = True
+    for i in range(1, len(the_str)/2 + 1):
+        if (the_str[i * 2 - 1] != '\x00'):
+            is_wide = False
+            break
+    return is_wide
+
+def convert_wide_to_ascii(the_str):
+    """
+    Convert a simple wide string to ASCII.
+    """
+    if (not is_wide_str(the_str)):
+        return the_str
+    # Return every other character.
+    return the_str[::2]
+    
 def is_mixed_wide_ascii_str(the_str):
     """
     Test a string to see if it is a mix of wide and ASCII chars.
     """
-    for c in the_str:
-        if (ord(c) > 127):
-            return True
+    uni_str = None
+    try:
+        uni_str = the_str.decode("utf-8")
+    except UnicodeDecodeError:
+        # Punt.
+        return False
+    extended_asc_pat = b"[\x80-\xff]"
+    if (re.search(extended_asc_pat, uni_str) is not None):
+        return True
     return False
 
 str_to_ascii_map = None
@@ -245,9 +285,13 @@ class VbStr(object):
 
         """
 
+        # Track if this is a VBScript string.
+        self.is_vbscript = is_vbscript
+        
         # Copy contructor? (sort of).
         if (isinstance(orig_str, list)):
             self.vb_str = orig_str
+            self.orig_str = "".join(self.vb_str)
             return
 
         # Make sure we have a string.
@@ -258,13 +302,13 @@ class VbStr(object):
                 orig_str = ''.join(filter(lambda x:x in string.printable, orig_str))
             else:
                 raise ValueError("Given value cannot be converted to a string.")
-                
+        self.orig_str = orig_str
+            
         # If this is VBScript each character will be a single byte (like the Python
         # string).
         self.vb_str = []
         if (is_vbscript):
-            for c in orig_str:
-                self.vb_str.append(c)
+            self.vb_str = list(orig_str)
 
         # This is a VBA string.
         else:
@@ -342,10 +386,7 @@ class VbStr(object):
         """
         Return the VB string as a raw Python str.
         """
-        r = ""
-        for c in self.vb_str:
-            r += c
-        return r
+        return "".join(self.vb_str)
 
     def get_chunk(self, start, end):
         """
