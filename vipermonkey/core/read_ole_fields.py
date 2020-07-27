@@ -162,6 +162,57 @@ def get_defaulttargetframe_text(data):
     if (re.search(pat, contents) is None):
         return None
     return re.findall(pat, contents)[0]
+
+def get_customxml_text(data):
+    """
+    Read custom CustomXMLParts text values from an Office 2007+ file.
+    """
+
+    # We can only do this with 2007+ files.
+    if (not filetype.is_office2007_file(data, True)):
+        return []
+
+    # Unzip the file contents.
+    unzipped_data, fname = unzip_data(data)
+    delete_file = (fname is not None)
+    if (unzipped_data is None):
+        return []
+
+    # ActiveDocument.CustomXMLParts(ActiveDocument.CustomXMLParts.Count).SelectNodes("//Items")(1).ChildNodes(2).Text
+    
+    # Process each customXml/itemNN.xml file.
+    r = []
+    for nn in range(1, 6):
+
+        # Does customXml/itemNN.xml exist?
+        zip_subfile = 'customXml/item' + str(nn) + ".xml"
+        if (zip_subfile not in unzipped_data.namelist()):
+            continue
+
+        # Read customXml/itemNN.xml.
+        f1 = unzipped_data.open(zip_subfile)
+        contents = f1.read()
+        f1.close()
+    
+        # <Item1>VALUE HERE</Item1>
+        # Pull out the string value.
+        pat = r"<Item\d+>([^<]+)</Item\d+>"
+        if (re.search(pat, contents) is None):
+            continue
+        txt_val = re.findall(pat, contents)[0]
+
+        # Save it.
+        # This var name may need to be generalized.
+        # customxmlparts('activedocument.customxmlparts.count').selectnodes('//items')(1).childnodes('2').text
+        var_name = "customxmlparts('activedocument.customxmlparts.count').selectnodes('//items')(" + str(nn) + ").childnodes('2').text"
+        r.append((var_name, txt_val))
+
+    # Delete the temporary Office file.
+    if (delete_file):
+        os.remove(fname)
+
+    # Return the results.
+    return r
     
 def get_msftedit_variables_97(data):
     """
@@ -1300,9 +1351,10 @@ def get_ole_textbox_values(obj, vba_code):
             text = ""
             
         # Save the form name and text value.
-        if debug:
-            print "SET '" + name + "' = '" + text + "'"
-        r.append((name, text))
+        if ((text != "") or (not name.startswith("Page"))):
+            if debug:
+                print "SET '" + name + "' = '" + text + "'"
+            r.append((name, text))
 
         # Save that we found something for this variable.
         if (text != ""):
@@ -1364,7 +1416,7 @@ def get_ole_textbox_values(obj, vba_code):
     pos = -1
     last_val = ""
     if debug:
-        print "&&&&&&&&&&&&"
+        print "\nLONG STRS!!"
         print long_strs
     for dat in r:
 
@@ -1445,6 +1497,8 @@ def get_ole_textbox_values(obj, vba_code):
     longest_val = ""
     page_names = set()
     page_val = ""
+
+    # Find the longest string assigned to Page1.
     for pair in r:
         name = pair[0]
         val = pair[1]
@@ -1456,6 +1510,8 @@ def get_ole_textbox_values(obj, vba_code):
             continue
         if (len(val) > len(longest_val)):
             longest_val = val
+
+    # Just have 1 var/val assignment pair assigning Page1 to the longest val.
     if (longest_val != ""):
         tmp_r = []
         updated_page1 = False
@@ -1470,6 +1526,16 @@ def get_ole_textbox_values(obj, vba_code):
                 updated_page1 = True
         r = tmp_r
 
+    # If we have nothing assigned to Page1, just pick the longest string seen
+    # to assign to missing PageNN variables and hope for the best.
+    if debug:
+        print "\nPAGE VAL!!"
+        print page_val
+    if (page_val == ""):
+        for s in long_strs:
+            if (len(s) > len(page_val)):
+                page_val = s
+        
     # Fill in missing PageNN variables.
     for i in range(1, 5):
         curr_name = "Page" + str(i)
