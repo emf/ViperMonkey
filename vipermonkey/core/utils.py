@@ -39,8 +39,7 @@ import logging
 from logger import log
 
 # for logging
-from core.logger import log
-from core.logger import CappedFileHandler
+from logger import CappedFileHandler
 from logging import LogRecord
 from logging import FileHandler
 
