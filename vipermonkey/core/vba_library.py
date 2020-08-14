@@ -56,11 +56,13 @@ from from_unicode_str import *
 import decimal
 from curses_ascii import isprint
 import sys
+import traceback
 
 from pyparsing import *
 
 import vb_str
 from vba_context import VBA_LIBRARY
+from vba_object import coerce_to_int
 from vba_object import str_convert
 from vba_object import int_convert
 from vba_object import eval_arg
@@ -404,6 +406,54 @@ class RmDir(VbaLibraryFunc):
 
     def return_type(self):
         return "STRING"
+
+class _Chr(VbaLibraryFunc):
+    """
+    Implementation of Chr() and ChrW() used in Python JIT code.
+    This is also used under the covers by lib_functions.Chr.eval().
+    """
+
+    def eval(self, context, params=None):
+        if ((params is None) or (len(params) == 0)):
+            return "NULL"
+
+        # NOTE: in the specification, the parameter is expected to be an integer
+        # But in reality, VBA accepts a string containing the representation
+        # of an integer in decimal, hexadecimal or octal form.
+        # It also ignores leading and trailing spaces.
+        # Examples: Chr("65"), Chr("&65 "), Chr(" &o65"), Chr("  &H65")
+        # => need to parse the string as integer
+        # It also looks like floating point numbers are allowed.
+        param = None
+        try:
+            param = coerce_to_int(params[0])
+        except:
+            log.error("%r is not a valid chr() value. Returning ''." % params[0])
+            return ''
+        
+        # Figure out whether to create a unicode or ascii character.
+        converter = chr
+        if (param < 0):
+            param = param * -1
+        if (param > 255):
+            converter = unichr
+            
+        # Do the conversion.
+        try:
+            r = converter(param)
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("Chr(" + str(param) + ") = " + r)
+            return r
+        except Exception as e:
+            log.error(str(e))
+            log.error("%r is not a valid chr() value. Returning ''." % param)
+            return ""
+
+    def num_args(self):
+        return 1
+
+    def return_type(self):
+        return "STRING"
     
 class ChDir(VbaLibraryFunc):
     """
@@ -740,7 +790,7 @@ class Mid(VbaLibraryFunc):
 
         # What to do when start<=0 is not specified:
         if (start <= 0):
-            start = 1
+            return "NULL"
 
         # If length not specified, return up to the end of the string:
         if (len(params) == 2):
@@ -1345,6 +1395,8 @@ class AscW(VbaLibraryFunc):
         if ((params is None) or (len(params) == 0)):
             return "NULL"
         c = params[0]
+        if (c == "NULL"):
+            return 0
         if (isinstance(c, int)):
             r = c
         else:
@@ -1683,8 +1735,10 @@ class Int(VbaLibraryFunc):
                 r = int(decimal.Decimal(val))
             else:
                 r = int_convert(val)
-            if ((r > 2147483647) or (r < -2147483647)):
-                r = "ERROR"
+            # -32,768 to 32,767
+            if ((r > 32767) or (r < -32768)):
+                # Overflow. Assume On Error Resume Next.
+                r = "NULL"
             if (log.getEffectiveLevel() == logging.DEBUG):
                 log.debug("Int: return %r" % r)
             return r
@@ -1875,6 +1929,8 @@ class SaveAs(VbaLibraryFunc):
         except:
             return 0
 
+        # Save the current doc to a file.
+
         # Handle saving as text.
         # wdFormatText = 2
         if (fmt != 2):
@@ -1904,7 +1960,10 @@ class SaveAs(VbaLibraryFunc):
 
         # Done.
         return 1
-            
+
+class SaveAs2(SaveAs):
+    pass
+    
 class LoadXML(VbaLibraryFunc):
     """
     LoadXML() MSXML2.DOMDocument.3.0 method.
@@ -2306,6 +2365,9 @@ class CLng(VbaLibraryFunc):
                 elif (len(tmp) == 1):
                     tmp = ord(tmp)
             r = int(tmp)
+            if ((r > 2147483647) or (r < -2147483647)):
+                # Overflow. Assume On Error Resume Next.
+                r = "NULL"
         except:
             pass 
         if (log.getEffectiveLevel() == logging.DEBUG):
@@ -4386,7 +4448,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                Error, LanguageID, MultiByteToWideChar, IsNull, SetStringValue, TypeName,
                VarType, Send, CreateShortcut, Popup, MakeSureDirectoryPathExists,
                GetSaveAsFilename, ChDir, ExecuteExcel4Macro, VarPtr, WriteText, FileCopy,
-               WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour):
+               WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 
