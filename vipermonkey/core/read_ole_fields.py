@@ -1118,10 +1118,10 @@ def _find_str_with_most_repeats(strs):
     # Done.
     return (max_str, max_subst)
 
-def get_ole_text_method_1(vba_code, data):
+def get_ole_text_method_1(vba_code, data, debug=False):
 
     # Debug this thing.
-    debug1 = False
+    debug1 = debug
     #debug1 = True
     
     # Strip some red herring strings from the data.
@@ -1133,6 +1133,16 @@ def get_ole_text_method_1(vba_code, data):
            replace("\xfc", "").\
            replace("\x19 ", "").\
            replace("_epx" + chr(223), "").\
+           replace("," + chr(0) + chr(229), "").\
+           replace("R\x00o\x00o\x00t\x00 \x00E\x00n\x00t\x00r\x00y", "").\
+           replace("Embedded Object", "").\
+           replace("mbedded Object", "").\
+           replace("bedded Object", "").\
+           replace("edded Object", "").\
+           replace("dded Object", "").\
+           replace("ded Object", "").\
+           replace("ed Object", "").\
+           replace("d Object", "").\
            replace("jd\x00\x00", "\x00").\
            replace("\x00\x00", "\x00")
     if debug1:
@@ -1215,31 +1225,58 @@ def get_ole_text_method_1(vba_code, data):
             # case with the substring.
 
             # Find the portion of the repeated string in the 1st half of the string.
+            # 112345
+            # foo11
+            # 2345bar
             first_half_rep = None
             second_half_rep = None
-            for i in range(1, len(repeated_subst)):
+            got_match = False
+            #print "CHECK !!!!!!!!!!!!!"
+            for i in range(1, len(repeated_subst) + 1):
                 curr_first_half = repeated_subst[:i]
+                #print "++++"
+                #print curr_first_half
                 if aggregate_str.endswith(curr_first_half):
                     first_half_rep = curr_first_half
                     second_half_rep = repeated_subst[i:]
-                    break
 
+            # Repeated string not split up (1st string ends with repeated string)?
+            if (first_half_rep == repeated_subst):
+                first_half_rep = None
+                second_half_rep = None
+                    
             # There could be extra characters in front of the 2nd half of the string.
             if (first_half_rep is not None):
 
+                if debug1:
+                    print "FIRST HALF!!"
+                    print first_half_rep
+                    print "SECOND HALF!!"
+                    print second_half_rep
+                
                 # Figure out characters to skip in the 2nd half.
                 start_pos = 0
                 while (start_pos < len(val)):
                     if (val[start_pos:].startswith(second_half_rep)):
                         break
                     start_pos += 1
+                if debug1:
+                    print "SKIP 2nd HALF!!"
+                    print val[:start_pos]
                 val = val[start_pos:]
 
             # The repeated string was not split.
             else:
 
                 # Clear some stupid Office 97 cruft from the 2nd half of the string.
-                val = re.sub(obj_pat, "", val)
+                if (repeated_subst in val):
+                    start_pos = val.index(repeated_subst)                    
+                    while (((start_pos - 1) >= 0) and
+                           (re.match("[A-Za-z]", val[start_pos - 1]) is not None)):
+                        start_pos -= 1
+                    val = val[start_pos:]
+                else:
+                    val = re.sub(obj_pat, "", val)
                 
             # Add in another payload piece.
             aggregate_str += val
