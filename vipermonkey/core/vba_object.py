@@ -197,7 +197,7 @@ class VBA_Object(object):
 
         # Check for timeouts.
         limits_exceeded(throw_error=True)
-
+        
         # Skipping visiting embedded loops? Check to see if we are already
         # in a loop and the current VBA object is a loop.
         if (no_embedded_loops and
@@ -217,7 +217,8 @@ class VBA_Object(object):
             visitor.in_loop = True
 
         # Visit the current item.
-        if (not visitor.visit(self)):
+        visit_status = visitor.visit(self)
+        if (not visit_status):
             return
 
         # Save the in loop status so we can restore it after visiting the children.
@@ -581,7 +582,7 @@ def _get_var_vals(item, context):
     """
 
     import procedures
-    
+
     # Get all the variables.
 
     # Vars on RHS.
@@ -597,6 +598,7 @@ def _get_var_vals(item, context):
     # Get a value for each variable.
     var_names = var_names.union(lhs_var_names)
     r = {}
+    zero_arg_funcs = set()
     for var in var_names:
 
         # Do we already know the variable value?
@@ -618,10 +620,16 @@ def _get_var_vals(item, context):
                 continue
             
             # Function definitions are not valid values.
-            if (isinstance(val, procedures.Function) or
-                isinstance(val, procedures.Sub) or
-                isinstance(val, VbaLibraryFunc)):
-                val = None
+            if ((isinstance(val, procedures.Function) or
+                 isinstance(val, procedures.Sub) or
+                 isinstance(val, VbaLibraryFunc)) and
+                # 0 arg func calls should only appear on the RHS
+                (var not in lhs_var_names)):
+                zero_arg_funcs.add(var)
+
+                # Don't treat these function calls as variables and
+                # assign initial values to them.
+                continue
 
             # 'inf' is not a valid value.
             if ((str(val).strip() == "inf") or
@@ -669,7 +677,7 @@ def _get_var_vals(item, context):
         context.set("__ORIG__" + var, val, force_global=True)
 
     # Done.
-    return r
+    return (r, zero_arg_funcs)
 
 def _loop_vars_to_python(loop, context, indent):
     """
@@ -677,7 +685,7 @@ def _loop_vars_to_python(loop, context, indent):
     """
     indent_str = " " * indent
     loop_init = ""
-    init_vals = _get_var_vals(loop, context)
+    init_vals, _ = _get_var_vals(loop, context)
     sorted_vars = list(init_vals.keys())
     sorted_vars.sort()
     for var in sorted_vars:
@@ -875,7 +883,16 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         #safe_print("REMOVE THIS!!")
         #raise e
         return False
+
     except Exception as e:
+
+        # If we bombed out due to a potential infinite loop we
+        # are done.
+        if ("Infinite Loop" in str(e)):
+            log.warning("Detected infinite loop. Terminating loop.")
+            return True
+
+        # We had some other error. Emulating the loop in Python failed.
         log.error("JIT emulation failed. " + str(e))
         traceback.print_exc(file=sys.stdout)
         safe_print("-*-*-*-*-\n" + code_python + "\n-*-*-*-*-")

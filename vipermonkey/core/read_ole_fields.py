@@ -1051,7 +1051,15 @@ def _find_repeated_substrings(s, chunk_size, min_str_size):
             # Found an acceptable repeated substring?
             if ((old_curr_str is not None) and
                 (len(old_curr_str.strip()) >= min_str_size)):
+
+                # Save the full string.
                 r.add(old_curr_str)
+
+                # If this is a large string some substrings may be more
+                # common repeats. Add some of those.
+                if (len(old_curr_str) > min_str_size*3):
+                    for i in range(1, len(old_curr_str) - min_str_size*3):
+                        r.add(old_curr_str[:i*-1])
 
     # Done
     return r
@@ -1065,7 +1073,8 @@ def _find_most_repeated_substring(strs):
     all_substs = set()
     for s in strs:
         all_substs = all_substs.union(_find_repeated_substrings(s, 300, 4))
-
+    #print all_substs
+        
     # Found any repeated substrings?
     if (len(all_substs) == 0):
         return None
@@ -1128,7 +1137,7 @@ def get_ole_text_method_1(vba_code, data, debug=False):
     # Strip some red herring strings from the data.
     if debug1:
         print "\n\nSTART get_ole_text_method_1 !!!!"
-    data = re.sub(r"[\x20-\x7e]\x00\xe5", "", data)
+    data = re.sub(r"[\x20-\x7e]\x00(?:\xe5|\xd5)", "", data)
     data = data.replace("\x02$", "").\
            replace("\x01@", "").\
            replace("0\x00\xe5", "").\

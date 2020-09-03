@@ -839,6 +839,10 @@ def convert_colons_to_linefeeds(vba_code):
     Convert things like 'a=1:b=2' to 'a=1\n:b=2'
     """
 
+    # Skip if not needed.
+    if (":" not in vba_code):
+        return vba_code
+    
     # Track the characters that start and end blocks of text we won't change.
     marker_chars = [('"', '"'), ('[', ']'), ("'", '\n'), ('#', '#')]
 
@@ -874,14 +878,29 @@ def convert_colons_to_linefeeds(vba_code):
             change_chunk = change_chunk.replace(":", "\n")
             
             # Find the chunk of text to leave alone.
-            marker_pos2 = len(vba_code)
+            marker_pos2a = len(vba_code)
+            marker_pos2b = len(vba_code)
             if (use_end_marker in vba_code[marker_pos1+1:]):
-                marker_pos2 = vba_code[marker_pos1+1:].index(use_end_marker) + marker_pos1 + 2
-            if (use_start_marker == use_end_marker):
-                marker_pos2 -= 1
-            leave_chunk = vba_code[marker_pos1+1:marker_pos2]
-            
+                marker_pos2a = vba_code[marker_pos1+1:].index(use_end_marker) + marker_pos1 + 2
+
+            # New lines can't appear in any of the unchangeable blocks.
+            if ("\n" in vba_code[marker_pos1+1:]):
+                marker_pos2b = vba_code[marker_pos1+1:].index("\n") + marker_pos1 + 2
+
+            # Pick closest marker to choose to end unchangeable block.
+            if (marker_pos2b < marker_pos2a):
+                marker_pos2 = marker_pos2b
+                use_end_marker = "\n"
+            else:
+                marker_pos2 = marker_pos2a
+                
+            # Special handling for blocks where the start marker is the same as
+            # the end marker.
+            #if (use_start_marker == use_end_marker):
+            #    marker_pos2 -= 1
+
             # Save the modified chunk and the unmodified chunk.
+            leave_chunk = vba_code[marker_pos1+1:marker_pos2]
             r += change_chunk + leave_chunk
             pos = marker_pos2
 
@@ -895,7 +914,7 @@ def convert_colons_to_linefeeds(vba_code):
     # whole string.
     if (r == ""):
         r = vba_code
-
+        
     # Done
     #print "******************"
     #print r
@@ -1075,6 +1094,7 @@ def fix_difficult_code(vba_code):
         print vba_code
     if (("!" not in vba_code) and
         (":" not in vba_code) and
+        ("ElseIf" not in vba_code) and
         ("&;" not in vba_code) and
         ("^" not in vba_code) and
         ("Rem " not in vba_code) and
@@ -1110,6 +1130,12 @@ def fix_difficult_code(vba_code):
         # Replace colons in labels so they don't get broken up.
         label_pat = r"(\n\s*\w+):\s*\n"
         vba_code = re.sub(label_pat, r'\1__LABEL_COLON__\n', vba_code)
+
+        # Fix some errors.
+        vba_code = vba_code.replace(" Do__LABEL_COLON__", " Do:").\
+                   replace("\nDo__LABEL_COLON__", "\nDo:").\
+                   replace(" Else__LABEL_COLON__", " Else:").\
+                   replace("\nElse__LABEL_COLON__", "\nElse:")
         
     # Temporarily replace macro #if, etc. with more unique strings. This is needed
     # to handle tracking '#...#' delimited date strings in the next loop.
@@ -1185,6 +1211,18 @@ def fix_difficult_code(vba_code):
         print "HERE: 17"
         print vba_code
     vba_code = convert_colons_to_linefeeds(vba_code)
+
+    # We have just broken up single line statements seperated by ":" into
+    # multiple lines. Now fix some elseif lines if needed.
+    # "ElseIf c >= 65 And c <= 90 Then f = 65"
+    uni_vba_code = u""
+    try:
+        uni_vba_code = u"\n" + vba_code.decode("utf-8") + u"\n"
+    except UnicodeDecodeError:
+        pass
+    elif_pat = "(ElseIf.{5,50}Then)"
+    if (re2.search(unicode(elif_pat), uni_vba_code) is not None):
+        vba_code = re.sub(elif_pat, r"\1\n", vba_code)
     
     # Characters that change how we modify the code.
     interesting_chars = [r'"', r'\#', r"'", r"!", r"\+",
@@ -1445,6 +1483,54 @@ def strip_comments(vba_code):
     # Return stripped code.
     return r
 
+defined_constants = set()
+def find_defined_constants(vba_code):
+    """
+    Get the names of all the defined constants in the given VB code.
+    """
+
+    # Only do this if needed.
+    if ("Const " not in vba_code):
+        return
+
+    # Find the names of all the declared const variables in current VBA code chunk.
+    const_pat = r" Const +([\w_]+) "
+    const_names = re.findall(const_pat, vba_code)
+
+    # Save the names of the constants for later use.
+    defined_constants.update(const_names)
+    
+def rename_constants(vba_code):
+    """
+    Make sure constants have unique names to avoid overlap with function
+    names.
+    """
+
+    # Only do this if needed.
+    if (len(defined_constants) == 0):
+        return vba_code
+    #print defined_constants
+
+    # Punt if we have no const declarations.
+    if (len(defined_constants) == 0):
+        return vba_code
+
+    # Replace all non-function call references to the const variables
+    # with unique names.
+    for const_name in defined_constants:
+
+        # Regular reference as a variable.
+        rep_pat = const_name + r"(\s*[^\(^=^ ^\w^_])"
+        vba_code = re.sub(rep_pat, const_name + r"_CONST\1", vba_code)
+
+        # Initial Const assignment.
+        # Const foo = 12
+        rep_pat = r"Const\s+(" + const_name + r")\s*"
+        vba_code = re.sub(rep_pat, r"Const \1_CONST ", vba_code)
+
+    # Done.
+    return vba_code
+
 def fix_vba_code(vba_code):
     """
     Fix up some substrings that ViperMonkey has problems parsing.
@@ -1640,6 +1726,27 @@ def fix_vba_code(vba_code):
         print vba_code
     vba_code = replace_constant_int_inline(vba_code)
 
+    # Rename existing constants to avoid name overlaps with functions.
+    # Why does VB allow that? GRRRR.
+    if debug_strip:
+        print "FIX_VBA_CODE: 17.5"
+        print vba_code
+    vba_code = rename_constants(vba_code)
+
+    # Fix bogus calls like 'foo"ARG STR"'.
+    if debug_strip:
+        print "FIX_VBA_CODE: 17.6"
+        print vba_code
+    uni_vba_code = None
+    try:
+        uni_vba_code = vba_code.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if (uni_vba_code is not None):
+        bad_call_pat = "(\r?\n\s*[\w_]{2,50})\""
+        if (re2.search(unicode(bad_call_pat), uni_vba_code)):
+            vba_code = re.sub(bad_call_pat, r'\1 "', vba_code)
+
     # Skip the next part if unnneeded.
     if debug_strip:
         print "FIX_VBA_CODE: 18"
@@ -1700,7 +1807,7 @@ def fix_vba_code(vba_code):
 
         # Save the updated line.
         r += new_line + "\n"
-        
+            
     # Return the updated code.
     if debug_strip:
         print "FIX_VBA_CODE: 20"

@@ -61,6 +61,7 @@ from vba_object import _eval_python
 from vba_object import _boilerplate_to_python
 from vba_object import _updated_vars_to_python
 from vba_object import _loop_vars_to_python
+from vba_object import _get_var_vals
 import procedures
 from let_statement_visitor import *
 from var_in_expr_visitor import *
@@ -927,7 +928,7 @@ class Let_Statement(VBA_Object):
             # Modify the string.
             vb_the_str = vb_str.VbStr(the_str, context.is_vbscript)
             #mod_str = the_str[:start-1] + rhs + the_str[(start-1 + size):]
-            mod_str = vb_the_str.update_chunk(start - 1, start - 2 + size, vb_rhs).to_python_str()
+            mod_str = vb_the_str.update_chunk(start - 1, start - 1 + size, vb_rhs).to_python_str()
 
             # Set the string in the context.
             tmp_let = self._make_let_statement(the_str_var, mod_str)
@@ -1371,6 +1372,10 @@ def _called_funcs_to_python(loop, context, indent):
     loop.accept(call_visitor)
     func_names = call_visitor.called_funcs
 
+    # Get all of the 0 argument functions called in the loop.
+    _, zero_arg_funcs = _get_var_vals(loop, context)
+    func_names.update(zero_arg_funcs)
+    
     # Get the definitions for all local functions called.
     local_funcs = []
     for func_name in func_names:
@@ -4039,7 +4044,9 @@ class Redim_Statement(VBA_Object):
             context.set(self.item, [])
 
         # Is this a Byte array?
-        elif (str(context.get_type(self.item)) == "Byte Array"):
+        # Or calling ReDim on something that does not exist (grrr)?
+        elif ((str(context.get_type(self.item)) == "Byte Array") or
+              (not context.contains(self.item))):
 
             # Do we have a start and end for the new size?
             if ((self.start is not None) and (self.end is not None)):
