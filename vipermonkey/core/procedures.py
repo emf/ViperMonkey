@@ -47,10 +47,13 @@ import sys
 from vba_context import *
 from statements import *
 from identifiers import *
+import utils
 
 from logger import log
 from tagged_block_finder_visitor import *
 from vba_object import to_python
+from vba_object import _get_var_vals
+from vba_object import _check_for_iocs
 
 # --- SUB --------------------------------------------------------------------
 
@@ -80,6 +83,17 @@ class Sub(VBA_Object):
 
     def to_python(self, context, params=None, indent=0):
 
+        # Get the global variables read in the function body.
+        tmp_context = Context(context=context)
+        global_var_info, _ = _get_var_vals(self, tmp_context, global_only=True)
+        
+        # Set up the initial values for the global variables.
+        global_var_init_str = ""
+        indent_str = " " * indent
+        for global_var in global_var_info.keys():
+            val = global_var_info[global_var]
+            global_var_init_str += indent_str + str(global_var) + " = " + str(val) + "\n"
+
         # Make a copy of the context so we can mark variables as function
         # arguments.
         tmp_context = Context(context=context)
@@ -88,7 +102,10 @@ class Sub(VBA_Object):
 
         # Save the name of the current function so we can handle exit function calls.
         tmp_context.curr_func_name = str(self.name)
-            
+
+        # Global variable initialization goes first.
+        r = global_var_init_str
+        
         # Define the function prototype.
         indent_str = " " * indent
         func_args = "("
@@ -97,18 +114,28 @@ class Sub(VBA_Object):
             if (not first):
                 func_args += ", "
             first = False
-            func_args += to_python(param, tmp_context)
+            func_args += utils.fix_python_overlap(to_python(param, tmp_context))
         func_args += ")"
-        r = indent_str + "def " + str(self.name) + func_args + ":\n"
+        r += indent_str + "def " + str(self.name) + func_args + ":\n"
 
         # Init return value.
         r += indent_str + " " * 4 + "import core.vba_library\n"
-        r += indent_str + " " * 4 + "global vm_context\n"
+        r += indent_str + " " * 4 + "global vm_context\n\n"
+        r += indent_str + " " * 4 + "# Function return value.\n"
         r += indent_str + " " * 4 + str(self.name) + " = 0\n\n"
+
+        # Global variables used in the function.
+        r += indent_str + " " * 4 + "# Referenced global variables.\n"
+        for global_var in global_var_info.keys():
+            r += indent_str + " " * 4 + "global " + str(global_var) + "\n"
+        r += "\n"
         
         # Function body.
         r += to_python(self.statements, tmp_context, indent=indent+4, statements=True)
 
+        # Check for IOCs.
+        r += "\n" + _check_for_iocs(self, tmp_context, indent=indent+4)
+        
         # Done.
         return r
     
@@ -412,6 +439,17 @@ class Function(VBA_Object):
 
     def to_python(self, context, params=None, indent=0):
         
+        # Get the global variables read in the function body.
+        tmp_context = Context(context=context)
+        global_var_info, _ = _get_var_vals(self, tmp_context, global_only=True)
+        
+        # Set up the initial values for the global variables.
+        global_var_init_str = ""
+        indent_str = " " * indent
+        for global_var in global_var_info.keys():
+            val = global_var_info[global_var]
+            global_var_init_str += indent_str + str(global_var) + " = " + str(val) + "\n"
+        
         # Make a copy of the context so we can mark variables as function
         # arguments.
         tmp_context = Context(context=context)
@@ -420,27 +458,39 @@ class Function(VBA_Object):
 
         # Save the name of the current function so we can handle exit function calls.
         tmp_context.curr_func_name = str(self.name)
-            
+
+        # Global variable initialization goes first.
+        r = global_var_init_str
+        
         # Define the function prototype.
-        indent_str = " " * indent
         func_args = "("
         first = True
         for param in self.params:
             if (not first):
                 func_args += ", "
             first = False
-            func_args += to_python(param, tmp_context)
+            func_args += utils.fix_python_overlap(to_python(param, tmp_context))
         func_args += ")"
-        r = indent_str + "def " + str(self.name) + func_args + ":\n"
+        r += indent_str + "def " + str(self.name) + func_args + ":\n"
 
         # Init return value.
         r += indent_str + " " * 4 + "import core.vba_library\n"
-        r += indent_str + " " * 4 + "global vm_context\n"
+        r += indent_str + " " * 4 + "global vm_context\n\n"
+        r += indent_str + " " * 4 + "# Function return value.\n"
         r += indent_str + " " * 4 + str(self.name) + " = 0\n\n"
-        
+
+        # Global variables used in the function.
+        r += indent_str + " " * 4 + "# Referenced global variables.\n"
+        for global_var in global_var_info.keys():
+            r += indent_str + " " * 4 + "global " + str(global_var) + "\n"
+        r += "\n"
+            
         # Function body.
         r += to_python(self.statements, tmp_context, indent=indent+4, statements=True)
 
+        # Check for IOCs.
+        r += "\n" + _check_for_iocs(self, tmp_context, indent=indent+4)
+        
         # Return the function return val.
         r += "\n" + indent_str + " " * 4 + "return " + str(self.name) + "\n"
 
@@ -470,20 +520,20 @@ class Function(VBA_Object):
 
         # Compute the argument values.
         call_info = {}
-        call_info["FUNCTION_NAME -->"] = self.name
+        call_info["FUNCTION_NAME -->"] = (self.name, None)
 
         # add function name in locals if the function takes 0 arguments. This is
         # needed since otherwise it is not possible to differentiate a function call
         # from a reference to the function return value in the function body.
         if (len(self.params) == 0):
-            call_info[self.name] = 'NULL'
+            call_info[self.name] = ('NULL', None)
 
         # Set the default parameter values.
         for param in self.params:
             init_val = None
             if (param.init_val is not None):
                 init_val = eval_arg(param.init_val, context=context)
-            call_info[param.name] = init_val
+            call_info[param.name] = (init_val, None)
             
         # Array accesses of calls to functions that return an array are parsed as
         # function calls with the array indices given as function call arguments. Note
@@ -524,9 +574,9 @@ class Function(VBA_Object):
                 log.debug('Function %s: setting param %s = %r' % (self.name, param_name, param_value))
             # Handle params with default values.
             if ((param_name not in call_info) or
-                (call_info[param_name] == '') or
+                (call_info[param_name] == ('', None)) or
                 (param_value != "NULL")):
-                call_info[param_name] = param_value
+                call_info[param_name] = (param_value, defined_param.my_type)
 
             # Is this a ByRef parameter?
             if (defined_param.mechanism == "ByRef"):
@@ -553,7 +603,8 @@ class Function(VBA_Object):
         
         # Set the parameter values in the current context.
         for param_name in call_info.keys():
-            context.set(param_name, call_info[param_name], force_local=True)
+            param_val, param_type = call_info[param_name]
+            context.set(param_name, param_val, var_type=param_type, force_local=True)
         
         # Variable updates can go in the local scope.
         old_global_scope = context.global_scope

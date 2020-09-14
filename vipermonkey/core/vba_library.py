@@ -556,7 +556,20 @@ class FolderExists(VbaLibraryFunc):
 
     def num_args(self):
         return 1
-    
+
+class GetFile(VbaLibraryFunc):
+    """
+    GetFile() VB method (stubbed).
+    """
+
+    def eval(self, context, params=None):
+        if (params is None):
+            return
+        context.report_action('Get File', "GetFile(" + str(params) + ")", '---', strip_null_bytes=True)
+
+    def num_args(self):
+        return 1
+
 class FileCopy(VbaLibraryFunc):
     """
     FileCopy() VB function (stubbed).
@@ -570,6 +583,9 @@ class FileCopy(VbaLibraryFunc):
     def num_args(self):
         return 2
 
+class CopyFile(FileCopy):
+    pass
+    
 class CopyHere(VbaLibraryFunc):
     """
     CopyHere() VB function (stubbed).
@@ -1002,9 +1018,10 @@ class BuiltInDocumentProperties(VbaLibraryFunc):
 
         # Get the property we are looking for.
         prop = str(params[0])
-        if (not context.contains(prop)):
-            return "NULL"
-        return context.read_metadata_item(prop)
+        r = context.read_metadata_item(prop)
+        if (r == ""):
+            r = "NULL"
+        return r
 
     def num_args(self):
         return 1
@@ -1856,7 +1873,7 @@ class Replace(VbaLibraryFunc):
             # Convert the string to change to ASCII.
             log.warning("Replace() called on wide string w. ASCII pattern and replacement. Converting to ASCII ...")
             string = vb_str.convert_wide_to_ascii(string)
-            
+
         # regex replacement?
         if (params[-1] == "<-- USE REGEX -->"):
             
@@ -2662,6 +2679,9 @@ class Val(VbaLibraryFunc):
         # Ignore whitespace.
         tmp = str_convert(params[0]).strip().replace(" ", "")
 
+        # No nulls.
+        tmp = tmp.replace("\x00", "")
+        
         # The VB Val() function is ugly. Look for VB hex encoding.
         nums = re.compile(r"&[Hh][0-9A-Fa-f]+")
         matches = nums.search(tmp)
@@ -2941,6 +2961,9 @@ class Rnd(VbaLibraryFunc):
     def eval(self, context, params=None):
         return random.random()
 
+    def num_args(self):
+        return 0
+    
 class Environ(VbaLibraryFunc):
     """
     Environ() function for getting environment variable values.
@@ -3786,7 +3809,10 @@ class Cells(VbaLibraryFunc):
 
             # Return the cell contents.
             try:
-                r = str(sheet.cell(row, col)).replace("text:", "").replace("'", "")
+                raw_cell = sheet.cell(row, col)
+                r = str(raw_cell).replace("text:", "")
+                if (r.startswith("'") and r.endswith("'")):
+                    r = r[1:-1]
                 if (r.startswith('u')):
                     r = r[1:]
                 if (log.getEffectiveLevel() == logging.DEBUG):
@@ -4458,7 +4484,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                VarType, Send, CreateShortcut, Popup, MakeSureDirectoryPathExists,
                GetSaveAsFilename, ChDir, ExecuteExcel4Macro, VarPtr, WriteText, FileCopy,
                WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2,
-               Chr):
+               Chr, CopyFile, GetFile):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

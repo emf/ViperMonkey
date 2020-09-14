@@ -474,9 +474,11 @@ def _boilerplate_to_python(indent):
     boilerplate = indent_str + "import core.vba_library\n"
     boilerplate += indent_str + "from core.utils import safe_print\n"
     boilerplate += indent_str + "import core.utils\n"
+    boilerplate += indent_str + "from core.vba_object import update_array\n"
     boilerplate += indent_str + "from core.vba_object import coerce_to_num\n"
-    boilerplate += indent_str + "from core.vba_object import coerce_to_int\n\n"
-    boilerplate += indent_str + "from core.vba_object import coerce_to_str\n\n"
+    boilerplate += indent_str + "from core.vba_object import coerce_to_int\n"
+    boilerplate += indent_str + "from core.vba_object import coerce_to_str\n"
+    boilerplate += indent_str + "from core.vba_object import coerce_to_int_list\n\n"
     boilerplate += indent_str + "try:\n"
     boilerplate += indent_str + " " * 4 + "vm_context\n"
     boilerplate += indent_str + "except NameError:\n"
@@ -573,7 +575,7 @@ def _infer_type(var, code_chunk, context):
     # Does not look like a string, assume int.
     return "INTEGER"
 
-def _get_var_vals(item, context):
+def _get_var_vals(item, context, global_only=False):
     """
     Get the current values for all of the referenced VBA variables that appear in the 
     given VBA object.
@@ -606,11 +608,15 @@ def _get_var_vals(item, context):
         try:
 
             # Try to get the current value.
-            val = context.get(var)
-
-            # Fix the Python escape character in the value if it is a string.
-            if (isinstance(val, str)):
-                pass
+            val = context.get(var, global_only=global_only)
+            
+            # We have been kind of fuzzing the distinction between global and
+            # local variables, so tighten down on globals only by just picking
+            # up VB constants.
+            if (global_only and
+                (var not in context.vb_constants) and
+                (var.lower() not in context.vb_constants)):
+                continue
             
             # Do not set function arguments to new values.
             # Do not set loop index variables to new values.
@@ -620,16 +626,20 @@ def _get_var_vals(item, context):
                 continue
             
             # Function definitions are not valid values.
-            if ((isinstance(val, procedures.Function) or
-                 isinstance(val, procedures.Sub) or
-                 isinstance(val, VbaLibraryFunc)) and
-                # 0 arg func calls should only appear on the RHS
-                (var not in lhs_var_names)):
-                zero_arg_funcs.add(var)
+            if (isinstance(val, procedures.Function) or
+                isinstance(val, procedures.Sub) or
+                isinstance(val, VbaLibraryFunc)):
 
-                # Don't treat these function calls as variables and
-                # assign initial values to them.
-                continue
+                # Don't use the function definition as the value.
+                val = None
+                
+                # 0 arg func calls should only appear on the RHS
+                if (var not in lhs_var_names):
+                    zero_arg_funcs.add(var)
+
+                    # Don't treat these function calls as variables and
+                    # assign initial values to them.
+                    continue
 
             # 'inf' is not a valid value.
             if ((str(val).strip() == "inf") or
@@ -646,7 +656,8 @@ def _get_var_vals(item, context):
             
         # Unedfined variable.
         except KeyError:
-            pass
+            if global_only:
+                continue
 
         # Got a valid value for the variable?
         if (val is None):
@@ -670,7 +681,7 @@ def _get_var_vals(item, context):
         # embedded loop Python code generation stomping on the value.
         context.set(var, "__ALREADY_SET__")
         context.set(var, "__ALREADY_SET__", force_global=True)
-
+        
         # Save the original value so we know it's data type for later use in JIT
         # code generation.
         context.set("__ORIG__" + var, val)
@@ -770,6 +781,7 @@ def to_python(arg, context, params=None, indent=0, statements=False):
                 #print statement
                 #print e
                 #traceback.print_exc(file=sys.stdout)
+                #sys.exit(0)
                 return "ERROR! to_python failed! " + str(e)
             r += indent_str + "except Exception as e:\n"
             if (log.getEffectiveLevel() == logging.DEBUG):
@@ -783,6 +795,21 @@ def to_python(arg, context, params=None, indent=0, statements=False):
 
     # Done.
     return r
+
+def _check_for_iocs(loop, context, indent):
+    """
+    Check the variables modified in a loop to see if they were
+    set to interesting IOCs.
+    """
+    indent_str = " " * indent
+    lhs_visitor = lhs_var_visitor()
+    loop.accept(lhs_visitor)
+    lhs_var_names = lhs_visitor.variables
+    ioc_str = indent_str + "# Check for IOCs in intermediate variables.\n"
+    for var in lhs_var_names:
+        py_var = utils.fix_python_overlap(var)
+        ioc_str += indent_str + "vm_context.save_intermediate_iocs(" + py_var + ")\n"
+    return ioc_str
 
 def _updated_vars_to_python(loop, context, indent):
     """
@@ -849,6 +876,7 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
             code_python = _boilerplate_to_python(0) + "\n" + \
                           var_inits + "\n" + \
                           code_python + "\n" + \
+                          _check_for_iocs(loop, tmp_context, 0) + "\n" + \
                           _updated_vars_to_python(loop, tmp_context, 0)
         if (log.getEffectiveLevel() == logging.DEBUG):
             safe_print("JIT CODE!!")
@@ -859,16 +887,25 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         # strings. For performance we are not handling the MS VBA extended ASCII in the python
         # JIT code.
         if (not context.is_vbscript):
-
+            
             # Look for non-ASCII strings.
             non_ascii_pat = r'"[^"]*[\x7f-\xff][^"]*"'
             if (re.search(non_ascii_pat, code_python) is not None):
                 log.warning("VBA code contains Microsoft specific extended ASCII strings. Not JIT emulating.")
                 return False
+
+        # Check for dynamic code execution in called functions.
+        if (('"Execute", ' in code_python) or
+            ('"ExecuteGlobal", ' in code_python) or
+            ('"Eval", ' in code_python)):
+            log.warning("Functions called by loop Execute() dynamic code. Not JIT emulating.")
+            return False
             
         # Run the Python code.
         if (namespace is None):
-            exec(code_python)
+            # Magic. For some reason exec'ing in locals() makes the dynamically generated
+            # code recognize functions defined in the dynamic code. I don't know why.
+            exec code_python in locals()
         else:
             exec(code_python, namespace)
             var_updates = namespace["var_updates"]
@@ -1247,6 +1284,41 @@ def eval_args(args, context, treat_as_var_name=False):
     r = map(lambda arg: eval_arg(arg, context=context, treat_as_var_name=treat_as_var_name), args)
     return r
 
+def update_array(old_array, index, val):
+    """
+    Add an item to a Python list.
+    """
+
+    # Sanity check.
+    if (not isinstance(old_array, list)):
+        old_array = []
+    
+    # Do we need to extend the length of the list to include the indices?
+    if (index >= len(old_array)):
+        old_array.extend([0] * (index - len(old_array) + 1))
+    old_array[index] = val
+    return old_array
+
+def coerce_to_int_list(obj):
+    """
+    Coerce a constant string VBA object to a list of ASCII codes.
+    :param obj: VBA object
+    :return: list
+    """
+
+    # Already have a list?
+    if (isinstance(obj, list)):
+        return obj
+    
+    # Make sure we have a string.
+    s = coerce_to_str(obj)
+
+    # Convert this to a list of ASCII char codes.
+    r = []
+    for c in s:
+        r.append(ord(c))
+    return r
+
 def coerce_to_str(obj):
     """
     Coerce a constant VBA object (integer, Null, etc) to a string.
@@ -1327,6 +1399,13 @@ def coerce_to_int(obj):
     # Do we have a float string?
     if (isinstance(obj, str)):
 
+        # Do we have a null byte string?
+        if (obj.count('\x00') == len(obj)):
+            return 0
+        
+        # No NULLS.
+        obj = obj.replace("\x00", "")
+        
         # Float string?
         if ("." in obj):
             try:
@@ -1334,11 +1413,7 @@ def coerce_to_int(obj):
                 return int(obj)
             except:
                 pass
-
-        # Do we have a null byte string?
-        if (obj.count('\x00') == len(obj)):
-            return 0
-
+            
         # Hex string?
         hex_pat = r"&h[0-9a-f]+"
         if (re.match(hex_pat, obj.lower()) is not None):
