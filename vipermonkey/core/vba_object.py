@@ -68,6 +68,7 @@ import pyparsing
 
 import expressions
 from var_in_expr_visitor import *
+from function_call_visitor import *
 from lhs_var_visitor import *
 from utils import safe_print
 import utils
@@ -613,10 +614,12 @@ def _get_var_vals(item, context, global_only=False):
 
         # Do we already know the variable value?        
         val = None
+        orig_val = None
         try:
 
             # Try to get the current value.
             val = context.get(var, global_only=global_only)
+            orig_val = val
             
             # We have been kind of fuzzing the distinction between global and
             # local variables, so tighten down on globals only by just picking
@@ -647,6 +650,8 @@ def _get_var_vals(item, context, global_only=False):
 
                     # Don't treat these function calls as variables and
                     # assign initial values to them.
+                    context.set("__ORIG__" + var, orig_val, force_local=True)
+                    context.set("__ORIG__" + var, orig_val, force_global=True)
                     continue
 
             # 'inf' is not a valid value.
@@ -687,14 +692,16 @@ def _get_var_vals(item, context, global_only=False):
 
         # Mark this variable as being set in the Python code to avoid
         # embedded loop Python code generation stomping on the value.
-        context.set(var, "__ALREADY_SET__")
+        context.set(var, "__ALREADY_SET__", force_local=True)
         context.set(var, "__ALREADY_SET__", force_global=True)
         
         # Save the original value so we know it's data type for later use in JIT
         # code generation.
-        context.set("__ORIG__" + var, val)
-        context.set("__ORIG__" + var, val, force_global=True)
-
+        if (orig_val is None):
+            orig_val = val
+        context.set("__ORIG__" + var, orig_val, force_local=True)
+        context.set("__ORIG__" + var, orig_val, force_global=True)
+        
     # Done.
     return (r, zero_arg_funcs)
 
@@ -813,7 +820,10 @@ def _check_for_iocs(loop, context, indent):
     ioc_str = indent_str + "# Check for IOCs in intermediate variables.\n"
     for var in lhs_var_names:
         py_var = utils.fix_python_overlap(var)
-        ioc_str += indent_str + "vm_context.save_intermediate_iocs(" + py_var + ")\n"
+        ioc_str += indent_str + "try:\n"
+        ioc_str += indent_str + " "*4 + "vm_context.save_intermediate_iocs(" + py_var + ")\n"
+        ioc_str += indent_str + "except:\n"
+        ioc_str += indent_str + " "* 4 + "pass\n"
     return ioc_str
 
 def _updated_vars_to_python(loop, context, indent):
@@ -844,6 +854,81 @@ def _updated_vars_to_python(loop, context, indent):
         save_vals += indent_str + "print \"UPDATED VALS!!\"\n"
         save_vals += indent_str + "print var_updates\n"
     return save_vals
+
+def _get_all_called_funcs(item, context):
+    """
+    Get all of the local functions called in the given VBA object.
+    """
+
+    # Get all the functions called in the VBA object.
+    call_visitor = function_call_visitor()
+    item.accept(call_visitor)
+    func_names = call_visitor.called_funcs
+
+    # Get all of the 0 argument functions called in the VBA object.
+    tmp_context = Context(context=context, _locals=context.locals, copy_globals=True)
+    _, zero_arg_funcs = _get_var_vals(item, tmp_context)
+    func_names.update(zero_arg_funcs)
+    
+    # Get the definitions for all local functions called.
+    local_funcs = []
+    for func_name in func_names:
+        if (context.contains(func_name)):
+            curr_func = context.get(func_name)
+            if (isinstance(curr_func, VBA_Object)):
+                local_funcs.append(curr_func)
+
+    # Done. Return the definitions of all the local functions
+    # that were called.
+    return local_funcs
+
+def _called_funcs_to_python(loop, context, indent):
+    """
+    Convert all the functions called in the loop to Python.
+    """
+    
+    # Get the definitions for all local functions called directly in the loop.
+    local_funcs = _get_all_called_funcs(loop, context)
+    local_func_hashes = set()
+    for curr_func in local_funcs:
+        curr_func_hash = hashlib.md5(str(curr_func).encode()).hexdigest()
+        local_func_hashes.add(curr_func_hash)
+        
+    # Now get the definitions of all the local functions called by the local
+    # functions.
+    seen_funcs = set()
+    funcs_to_handle = list(local_funcs)
+    while (len(funcs_to_handle) > 0):
+
+        # Get the current function definition to check for calls.
+        curr_func = funcs_to_handle.pop()
+        curr_func_hash = hashlib.md5(str(curr_func).encode()).hexdigest()
+        
+        # Already looked at this one?
+        if (curr_func_hash in seen_funcs):
+            continue
+        seen_funcs.add(curr_func_hash)
+
+        # Get the functions called in the current function.
+        curr_local_funcs = _get_all_called_funcs(curr_func, context)
+
+        # Save the new functions for processing.
+        for new_func in curr_local_funcs:
+            new_func_hash = hashlib.md5(str(new_func).encode()).hexdigest()
+            if (new_func_hash not in local_func_hashes):
+                local_func_hashes.add(new_func_hash)
+                local_funcs.append(new_func)
+                funcs_to_handle.append(new_func)
+                
+    # Convert each local function to Python.
+    r = ""
+    for local_func in local_funcs:
+        r += to_python(local_func, context, indent=indent) + "\n"
+
+    # Done.
+    indent_str = " " * indent
+    r = indent_str + "# VBA Local Function Definitions\n" + r
+    return r
 
 def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=None):
     """
@@ -878,7 +963,9 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         code_python = to_python(loop, tmp_context)
         if add_boilerplate:
             var_inits, _ = _loop_vars_to_python(loop, tmp_context, 0)
+            func_defns = _called_funcs_to_python(loop, tmp_context, 0)
             code_python = _boilerplate_to_python(0) + "\n" + \
+                          func_defns + "\n" + \
                           var_inits + "\n" + \
                           code_python + "\n" + \
                           _check_for_iocs(loop, tmp_context, 0) + "\n" + \
@@ -905,7 +992,7 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
             ('"Eval", ' in code_python)):
             log.warning("Functions called by loop Execute() dynamic code. Not JIT emulating.")
             return False
-            
+        
         # Run the Python code.
         if (namespace is None):
             # Magic. For some reason exec'ing in locals() makes the dynamically generated
