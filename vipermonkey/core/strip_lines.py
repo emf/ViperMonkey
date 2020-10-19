@@ -617,6 +617,38 @@ def fix_bad_next_statements(vba_code):
             r = r.replace(bad_next, new_nexts)
     return r
 
+def fix_items_ref(vba_code):
+    """
+    Change Scripting.Dictionary.Items() references to 
+    Scripting.Dictionary.Items.
+    """
+
+    # Do we need to do this?
+    if (".Items()(" not in vba_code):
+        return vba_code
+    r = vba_code.replace(".Items()(", ".Items(")
+    return r
+
+def fix_stupid_string_concats(vba_code):
+    """
+    Change garbage string concatentations like 's1 & s2 & + "foo"' to
+    's1 & s2 & "foo"'.
+    """
+
+    # Do we need to do this?
+    uni_vba_code = None
+    try:
+        uni_vba_code = vba_code.decode("utf-8")
+    except UnicodeDecodeError:
+        # Punt.
+        return vba_code
+    if (re2.search(unicode(r"&\s+\+"), uni_vba_code) is None):
+        return vba_code
+
+    # Change the string concats to something sensible.
+    r = re.sub(r"&\s+\+", "& ", vba_code)
+    return r
+
 def fix_bad_exponents(vba_code):
     """
     Change things like '2^2' to '2 ^ 2'. 
@@ -845,7 +877,7 @@ def convert_colons_to_linefeeds(vba_code):
         return vba_code
     
     # Track the characters that start and end blocks of text we won't change.
-    marker_chars = [('"', '"'), ('[', ']'), ("'", '\n'), ('#', '#')]
+    marker_chars = [('"', '"'), ('[', ']'), ("'", '\n'), ('#', '#'), ("If ", "\n")]
 
     # Loop through the text leaving some blocks unchanged and others with ':' changed to '\n'.
     pos = 0
@@ -876,8 +908,12 @@ def convert_colons_to_linefeeds(vba_code):
 
             # Pull out the text to change.
             change_chunk = vba_code[pos:marker_pos1+1]
-            change_chunk = change_chunk.replace(":", "\n").replace("&", " & ")
-            
+            change_chunk = change_chunk.replace(":", "\n")
+            # 'a&"ff"'
+            change_chunk = re.sub(r"([\w_])&\"", r"\1 & \"", change_chunk)
+            # '"gg"&"ff"'
+            change_chunk = re.sub(r"\"&\"", r"\" & \"", change_chunk)
+
             # Find the chunk of text to leave alone.
             marker_pos2a = len(vba_code)
             marker_pos2b = len(vba_code)
@@ -976,6 +1012,14 @@ def fix_difficult_code(vba_code):
     if debug_strip:
         print "HERE: 2.6"
         print vba_code
+    vba_code = fix_stupid_string_concats(vba_code)
+    if debug_strip:
+        print "HERE: 2.6.1"
+        print vba_code
+    vba_code = fix_items_ref(vba_code)
+    if debug_strip:
+        print "HERE: 2.6.2"
+        print vba_code
     vba_code = fix_bad_next_statements(vba_code)
     if debug_strip:
         print "HERE: 2.7"
@@ -1041,6 +1085,7 @@ def fix_difficult_code(vba_code):
         vba_code = re.sub(namespace_pat, r"\1", vba_code)
     
     # We don't handle boolean expressions treated as integers. Comment them out.
+    """
     uni_vba_code = u""
     try:
         uni_vba_code = vba_code.decode("utf-8")
@@ -1072,6 +1117,7 @@ def fix_difficult_code(vba_code):
             # This is actually an integer expression with boolean logic.
             # Not handled.
             vba_code = vba_code.replace(bad_exp, "\n' UNHANDLED BOOLEAN INT EXPRESSION " + bad_exp[1:])
+    """
 
     # Comments like 'ddffd' at the end of an Else line are hard to parse.
     # Get rid of them.
@@ -1602,17 +1648,6 @@ def fix_vba_code(vba_code):
     for imp in implements:
         vba_code = vba_code.replace(imp, "")
         
-    # We don't handle Enum constructs for now. Delete them.
-    # TODO: Actually handle Enum consructs.
-    if debug_strip:
-        print "FIX_VBA_CODE: 8"
-        print vba_code
-    enums = re.findall(r"(?:(?:Public|Private)\s+)?Enum\s+.+?End\s+Enum", vba_code, re.DOTALL)
-    if (len(enums) > 0):
-        log.warning("VB Enum constructs are not currently handled. Stripping them from code...")
-    for enum in enums:
-        vba_code = vba_code.replace(enum, "")
-
     # We don't handle ([a1]) constructs for now. Delete them.
     # TODO: Actually handle these things.
     if debug_strip:
@@ -1751,6 +1786,15 @@ def fix_vba_code(vba_code):
         if (re2.search(unicode(bad_call_pat), uni_vba_code)):
             vba_code = re.sub(bad_call_pat, r'\1 "', vba_code)
 
+    # Fix rewritten &HFF... assignments.
+    # Should not be needed now.
+    ## ' & H20A'
+    #vba_code = re.sub(r" & (H[\dA-Fa-f])", r" &\1", vba_code)
+    ## ' &H20A &'
+    #vba_code = re.sub(r"(&H[\dA-Fa-f]+) & ", r"\1&", vba_code)
+    ## 'LastRow & ,'
+    #vba_code = re.sub(r"([\w_]+) & ,", r"\1&,", vba_code)
+    
     # Skip the next part if unnneeded.
     if debug_strip:
         print "FIX_VBA_CODE: 18"
@@ -1814,7 +1858,7 @@ def fix_vba_code(vba_code):
 
     # Wipe out all comments.
     r = strip_comments(r)
-        
+    
     # Return the updated code.
     if debug_strip:
         print "FIX_VBA_CODE: 20"
@@ -1979,7 +2023,7 @@ def strip_useless_code(vba_code, local_funcs):
                 continue
 
             # Skip const definitions.
-            if (line.strip().lower().startswith("const ")):
+            if (" const " in line.lower()):
                 if (log.getEffectiveLevel() == logging.DEBUG):
                     log.debug("SKIP: Const decl. Keep it.")
                 continue
@@ -2093,7 +2137,7 @@ def strip_useless_code(vba_code, local_funcs):
                     # Keep object creations.
                     if ("CreateObject" in val):
                         continue
-
+                    
                     # Keep updates of the LHS where the LHS appears on the RHS
                     # (ex. a = a + 1).
                     if (var.lower() in val.lower()):

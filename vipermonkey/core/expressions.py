@@ -69,7 +69,7 @@ import utils
 
 from logger import log
 
-def _vba_to_python_op(op):
+def _vba_to_python_op(op, is_boolean):
     """
     Convert a VBA boolean operator to a Python boolean operator.
     """
@@ -90,6 +90,12 @@ def _vba_to_python_op(op):
         "<>" : "!=",
         "is" : "=="
     }
+    if (not is_boolean):
+        op_map["Not"] = "~"
+        op_map["And"] = "&"
+        op_map["AndAlso"] = "&"
+        op_map["Or"] = "|"
+        op_map["OrElse"] = "|"
     return op_map[op]
 
 # --- FILE POINTER -------------------------------------------------
@@ -164,6 +170,9 @@ class SimpleNameExpression(VBA_Object):
         return var_name
     
     def eval(self, context, params=None):
+
+        import statements
+        
         if (log.getEffectiveLevel() == logging.DEBUG):
             log.debug('try eval variable/function %r' % self.name)
         try:
@@ -172,6 +181,7 @@ class SimpleNameExpression(VBA_Object):
                 log.debug('get variable %r = %r' % (self.name, value))
             if (isinstance(value, procedures.Function) or
                 isinstance(value, procedures.Sub) or
+                isinstance(value, statements.External_Function) or
                 isinstance(value, VbaLibraryFunc)):
 
                 # Only evaluate functions with 0 args since we have no
@@ -211,7 +221,8 @@ class SimpleNameExpression(VBA_Object):
 #
 # MS-GRAMMAR: simple-name-expression = name
 
-simple_name_expression = Optional(CaselessKeyword("ByVal").suppress()) + TODO_identifier_or_object_attrib('name')
+simple_name_expression = Optional(CaselessKeyword("ByVal").suppress()) + \
+                         (TODO_identifier_or_object_attrib('name') | enum_val_id('name'))
 simple_name_expression.setParseAction(SimpleNameExpression)
 
 unrestricted_name_expression = unrestricted_name('name')
@@ -308,8 +319,54 @@ class MemberAccessExpression(VBA_Object):
             r += "." + str(self.rhs1)
         return r
 
+    def _to_python_handle_add(self, context, indent):
+        """
+        Handle Add() object method calls like foo.Add(bar, baz). 
+        foo is (currently) a Scripting.Dictionary object.
+        """
+
+        # Currently we are only supporting JIT emulation of With blocks
+        # based on Scripting.Dictionary. Is that what we have?
+        with_dict = None
+        if ((context.with_prefix_raw is not None) and
+            (context.contains(str(context.with_prefix_raw)))):
+            with_dict = context.get(str(context.with_prefix_raw))
+            if (with_dict == "__ALREADY_SET__"):
+
+                # Try getting the original value.
+                with_dict = context.get("__ORIG__" + str(context.with_prefix_raw))
+
+            # Got Scripting.Dictionary?
+            if (not isinstance(with_dict, dict)):                
+                with_dict = None
+
+        # Can we do JIT code for this?
+        if (with_dict is None):
+            return None
+
+        # Is this a Scripting.Dictionary method call?
+        expr_str = str(self)
+        if (".Add(" not in expr_str):
+            return None
+            
+        # Generate python for the dictionary method call.
+        tmp_var = SimpleNameExpression(None, None, None, name=str(context.with_prefix_raw))
+        new_add = Function_Call(None, None, None, old_call=self.rhs[0])
+        tmp = [tmp_var]
+        for p in new_add.params:
+            tmp.append(p)
+        new_add.params = tmp
+        indent_str = " " * indent
+        r = indent_str + to_python(new_add, context)        
+        return r
+    
     def to_python(self, context, params=None, indent=0):
 
+        # Handle Scripting.Dictionary.Add() calls.
+        add_code = self._to_python_handle_add(context, indent)
+        if (add_code is not None):
+            return add_code
+        
         # For now just pick off the last item in the expression.
         if (len(self.rhs) > 0):
 
@@ -317,11 +374,23 @@ class MemberAccessExpression(VBA_Object):
             raw_last_func = str(self.rhs[-1]).replace("('", "(").replace("')", ")")
             if ((raw_last_func.startswith("Test(")) or
                 (raw_last_func.startswith("Replace(")) or
+                (raw_last_func.startswith("Global")) or
                 (raw_last_func.startswith("Pattern"))):
             
                 # Use the simulated RegExp object for this.
                 exp_str = str(self)
-                r = exp_str[:exp_str.rindex(".")] + "." + raw_last_func
+                call_str = raw_last_func
+                if (isinstance(self.rhs[-1], Function_Call)):
+                    the_call = self.rhs[-1]
+                    call_str = str(the_call.name) + "("
+                    first = True
+                    for p in the_call.params:
+                        if (not first):
+                            call_str += ", "
+                        first = False
+                        call_str += to_python(p, context)
+                    call_str += ")"
+                r = exp_str[:exp_str.rindex(".")] + "." + call_str
                 return r
 
             # Excel SpecialCells() method call?
@@ -917,10 +986,24 @@ class MemberAccessExpression(VBA_Object):
 
     def _handle_add(self, context, lhs, rhs):
         """
-        Handle Add() object method calls like foo.Replace(bar, baz). 
+        Handle Add() object method calls like foo.Add(bar, baz). 
         foo is (currently) a Scripting.Dictionary object.
         """
 
+        # Get the LHS as a dict if possible.
+        if (isinstance(lhs, str) and
+            lhs.startswith("{") and
+            lhs.endswith("}")):
+            try:
+                lhs = eval(lhs)
+            except SyntaxError:
+                pass
+
+        # Get the Dictionary if it is a With variable.
+        if ((context.with_prefix_raw is not None) and
+            (context.contains(str(context.with_prefix_raw)))):
+            lhs = context.get(str(context.with_prefix_raw))
+            
         # Sanity check.
         if (log.getEffectiveLevel() == logging.DEBUG):
             log.debug("_handle_add(): lhs = " + str(lhs) + ", rhs = " + str(rhs))
@@ -944,8 +1027,61 @@ class MemberAccessExpression(VBA_Object):
             log.debug("Add() func = " + str(new_add))
         
         # Evaluate the dictionary add.
-        new_add.eval(context)
-        return "updated dict"
+        new_dict = new_add.eval(context)
+
+        # Update the dict variable.
+        if (context.with_prefix_raw is not None):
+            context.set(str(context.with_prefix_raw), new_dict, do_with_prefix=False)
+        if (context.contains(str(self.lhs))):
+            context.set(str(self.lhs), new_dict, do_with_prefix=False)
+
+        # Done with the Add().
+        return new_dict
+
+    def _handle_exists(self, context, lhs, rhs):
+        """
+        Handle Exists() object method calls like foo.Exists(bar). 
+        foo is (currently) a Scripting.Dictionary object.
+        """
+
+        # Get the LHS as a dict if possible.
+        if (isinstance(lhs, str) and
+            lhs.startswith("{") and
+            lhs.endswith("}")):
+            try:
+                lhs = eval(lhs)
+            except SyntaxError:
+                pass
+
+        # Get the Dictionary if it is a With variable.
+        if ((context.with_prefix_raw is not None) and
+            (context.contains(str(context.with_prefix_raw)))):
+            lhs = context.get(str(context.with_prefix_raw))
+            
+        # Sanity check.
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("_handle_exists(): lhs = " + str(lhs) + ", rhs = " + str(rhs))
+        if ((isinstance(rhs, list)) and (len(rhs) > 0)):
+            rhs = rhs[0]
+        if (not isinstance(rhs, Function_Call)):
+            return None
+        if (rhs.name != "Exists"):
+            return None
+        if (not isinstance(lhs, dict)):
+            return None
+
+        # Run the dictionary exists.
+        new_exists = Function_Call(None, None, None, old_call=rhs)
+        tmp = [lhs]
+        for p in new_exists.params:
+            tmp.append(p)
+        new_exists.params = tmp
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("Exists() func = " + str(new_exists))
+        
+        # Evaluate the dictionary exists.
+        r = new_exists.eval(context)
+        return r
 
     def _handle_adodb_writes(self, lhs_orig, lhs, rhs, context):
         """
@@ -1608,6 +1744,12 @@ class MemberAccessExpression(VBA_Object):
                 #print "OUT: 25"
                 return call_retval
 
+            # Handle things like foo.Exists(bar).
+            call_retval = self._handle_exists(context, tmp_lhs, self.rhs)
+            if (call_retval is not None):
+                #print "OUT: 25.1"
+                return call_retval
+
             # Handle Excel cells() references.
             call_retval = self._handle_excel_read(context, self.rhs)
             if (call_retval is not None):
@@ -1907,9 +2049,89 @@ class With_Member_Expression(VBA_Object):
         return "." + str(self.expr)
 
     def to_python(self, context, params=None, indent=0):
-        return to_python(self.expr, context)
-    
+
+        # Currently we are only supporting JIT emulation of With blocks
+        # based on Scripting.Dictionary. Is that what we have?
+        with_dict = None
+        if ((context.with_prefix_raw is not None) and
+            (context.contains(str(context.with_prefix_raw)))):
+            with_dict = context.get(str(context.with_prefix_raw))
+            if (with_dict == "__ALREADY_SET__"):
+
+                # Try getting the original value.
+                with_dict = context.get("__ORIG__" + str(context.with_prefix_raw))
+
+            # Got Scripting.Dictionary?
+            if (not isinstance(with_dict, dict)):                
+                with_dict = None
+
+        # Can we do JIT code for this?
+        if (with_dict is None):
+            return "ERROR: Only doing JIT on Scripting.Dictionary With blocks."
+
+        # Is this a Scripting.Dictionary method call?
+        expr_str = str(self)
+        if ((not expr_str.startswith(".Exists")) and
+            (not expr_str.startswith(".Items")) and
+            (not expr_str.startswith(".Item")) and
+            (not expr_str.startswith(".Count"))):
+            return "ERROR: Only doing JIT on Scripting.Dictionary methods in With blocks."
+
+        # Count? Not parsed as a function call...
+        if (expr_str == ".Count"):
+            return "(len(" + context.with_prefix_raw + ") - 1)"
+
+        # Generate python for the dictionary method call.
+        tmp_var = SimpleNameExpression(None, None, None, name=str(context.with_prefix_raw))
+        new_exists = Function_Call(None, None, None, old_call=self.expr)
+        tmp = [tmp_var]
+        for p in new_exists.params:
+            tmp.append(p)
+        new_exists.params = tmp
+        r = to_python(new_exists, context, params)
+        return r
+        
+    def _handle_method_calls(self, context):
+        """
+        Handle Scripting.Dictionary...() calls.
+        """
+
+        # Is this a method call?
+        expr_str = str(self)
+        if ((not expr_str.startswith(".Exists")) and (not expr_str.startswith(".Count"))):
+            return None
+
+        # Get the Dictionary if it is a With variable.
+        if ((context.with_prefix_raw is None) or
+            (not context.contains(str(context.with_prefix_raw)))):
+            return None
+        with_dict = context.get(str(context.with_prefix_raw))
+
+        # Count? Not parsed as a function call...
+        if (expr_str == ".Count"):
+            return (len(with_dict) - 1)
+        
+        # Run the dictionary method call.
+        new_exists = Function_Call(None, None, None, old_call=self.expr)
+        tmp = [with_dict]
+        for p in new_exists.params:
+            tmp.append(p)
+        new_exists.params = tmp
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("Dictionary NNNNNN() func = " + str(new_exists))
+        
+        # Evaluate the dictionary exists.
+        r = new_exists.eval(context)
+        return r
+        
     def eval(self, context, params=None):
+
+        # Handle Scripting.Dictionary....() calls.
+        call_retval = self._handle_method_calls(context)
+        if (call_retval is not None):
+            return call_retval
+
+        # Plain eval.
         return self.expr.eval(context, params)
 
 with_member_access_expression = Suppress(".") + (simple_name_expression("expr") ^ function_call_limited("expr") ^ member_access_expression("expr")) 
@@ -2067,7 +2289,8 @@ class Function_Call(VBA_Object):
             
         if self.name.lower() in context._log_funcs \
                 or any(self.name.lower().endswith(func.lower()) for func in Function_Call.log_funcs):
-            context.report_action(self.name, params, 'Interesting Function Call', strip_null_bytes=True)
+            if ("Scripting.Dictionary" not in str(params)):
+                context.report_action(self.name, params, 'Interesting Function Call', strip_null_bytes=True)
         try:
 
             # Get the (possible) function.
@@ -2325,6 +2548,9 @@ class Function_Call(VBA_Object):
         
 # comma-separated list of parameters, each of them can be an expression:
 boolean_expression = Forward()
+# TODO: Since the VB designers in their infinite wisdom decided to use the same operators
+# for bitwise arithmetic as boolean logic, we somehow have to tell based on the context
+# whether we are doing bitwise or boolean operations. NEEDS WORK!!
 expr_item = Forward()
 expr_item_strict = Forward()
 # The 'ByVal' or 'ByRef' keyword can be given when the expr_list_item appears as an
@@ -2493,6 +2719,7 @@ typeof_expression = Forward()
 addressof_expression = Forward()
 literal_list_expression = Forward()
 literal_range_expression = Forward()
+limited_expression = Forward()
 expr_item <<= (
     Optional(CaselessKeyword("ByVal").suppress())
     + (
@@ -2512,6 +2739,7 @@ expr_item <<= (
         | excel_expression
         | literal_range_expression
         | literal_list_expression
+        | Suppress(Literal("(")) + boolean_expression + Suppress(Literal(")"))
     )
 )
 expr_item_strict <<= (
@@ -2569,18 +2797,18 @@ expression.setParseAction(lambda t: t[0])
 
 # Used in boolean expressions to limit confusion with boolean and/or and bitwise and/or.
 # Try to handle bitwise AND in boolean expressions. Needs work
-limited_expression = (infixNotation(expr_item,
-                                    [
-                                        ("-", 1, opAssoc.RIGHT, Neg), # Unary negation
-                                        ("^", 2, opAssoc.RIGHT, Power), # Exponentiation
-                                        (Regex(re.compile("[*/]")), 2, opAssoc.LEFT, MultiDiv),
-                                        ("\\", 2, opAssoc.LEFT, FloorDivision),
-                                        (CaselessKeyword("mod"), 2, opAssoc.RIGHT, Mod),
-                                        (Regex(re.compile('[-+]')), 2, opAssoc.LEFT, AddSub),
-                                        ("&", 2, opAssoc.LEFT, Concatenation),
-                                        (CaselessKeyword("xor"), 2, opAssoc.LEFT, Xor),
-                                    ])) | \
-                                    Suppress(Literal("(")) + expression + Suppress(")")
+limited_expression <<= (infixNotation(expr_item,
+                                      [
+                                          ("-", 1, opAssoc.RIGHT, Neg), # Unary negation
+                                          ("^", 2, opAssoc.RIGHT, Power), # Exponentiation
+                                          (Regex(re.compile("[*/]")), 2, opAssoc.LEFT, MultiDiv),
+                                          ("\\", 2, opAssoc.LEFT, FloorDivision),
+                                          (CaselessKeyword("mod"), 2, opAssoc.RIGHT, Mod),
+                                          (Regex(re.compile('[-+]')), 2, opAssoc.LEFT, AddSub),
+                                          ("&", 2, opAssoc.LEFT, Concatenation),
+                                          (CaselessKeyword("xor"), 2, opAssoc.LEFT, Xor),
+                                      ])) | \
+                                      Suppress(Literal("(")) + expression + Suppress(")")
 expression.setParseAction(lambda t: t[0])
 
 # constant expression: expression without variables or function calls, that can be evaluated to a literal:
@@ -2629,15 +2857,25 @@ class BoolExprItem(VBA_Object):
             log.error("BoolExprItem: Improperly parsed.")
             return ""
 
+    def _vba_to_python_op(self, op, context):
+        return _vba_to_python_op(op, not context.in_bitwise_expression)
+        
     def to_python(self, context, params=None, indent=0):
         r = " " * indent
+        expr_str = None
         if (self.op is not None):
-            r += to_python(self.lhs, context, params) + " " + _vba_to_python_op(self.op) + " " + to_python(self.rhs, context, params)
+            expr_str = to_python(self.lhs, context, params) + " " + self._vba_to_python_op(self.op, context) + " " + to_python(self.rhs, context, params)
         elif (self.lhs is not None):
-            r += to_python(self.lhs, context, params)
+            expr_str = to_python(self.lhs, context, params)
         else:
             log.error("BoolExprItem: Improperly parsed.")
             return ""
+
+        # Ooof. True in VB is -1, not 1 in bitwise operations. Handle that in the generated code.
+        if context.in_bitwise_expression:
+            r += "(-1 if " + expr_str + " else 0)"
+        else:
+            r += expr_str
         return r
         
     def eval(self, context, params=None):
@@ -2725,23 +2963,28 @@ class BoolExprItem(VBA_Object):
         lhs_str = str(lhs)
         if (("**MATCH ANY**" in lhs_str) or ("**MATCH ANY**" in rhs_str)):
             if (self.op == "<>"):
+                if (context.in_bitwise_expression):
+                    return 0
                 return False
+            if (context.in_bitwise_expression):
+                return -1
             return True
 
         # Evaluate the expression.
+        r = False
         if ((self.op.lower() == "=") or
             (self.op.lower() == "is")):            
-            return lhs == rhs
+            r = lhs == rhs
         elif (self.op == ">"):
-            return lhs > rhs
+            r = lhs > rhs
         elif (self.op == "<"):
-            return lhs < rhs
+            r = lhs < rhs
         elif ((self.op == ">=") or (self.op == "=>")):
-            return lhs >= rhs
+            r = lhs >= rhs
         elif ((self.op == "<=") or (self.op == "=<")):
-            return lhs <= rhs
+            r = lhs <= rhs
         elif (self.op == "<>"):
-            return lhs != rhs
+            r = lhs != rhs
         elif (self.op.lower() == "like"):
 
             # Try as a Python regex.
@@ -2752,20 +2995,32 @@ class BoolExprItem(VBA_Object):
                 r = (re.match(rhs, lhs) is not None)
                 if (log.getEffectiveLevel() == logging.DEBUG):
                     log.debug("'" + lhs + "' Like '" + rhs + "' == " + str(r))
-                return r
             except Exception as e:
 
                 # Not a valid Pyhton regex. Just check string equality.
-                return (rhs == lhs)
+                r = (rhs == lhs)
         else:
             log.error("BoolExprItem: Unknown operator %r" % self.op)
-            return False
+            r = False
 
+        # Yuck. In VB bitwise operations true == -1, not 1 as in Python.
+        # Handle that if this expression looks like it should be a bitwise expression.
+        if (context.in_bitwise_expression):
+            if r:
+                r = -1
+            else:
+                r = 0
+
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("Evaled '" + str(self) + "' == " + str(r))
+                
+        # Done.                
+        return r
+        
 bool_expr_item = (limited_expression + \
                   (oneOf(">= => <= =< <> = > < <>") | CaselessKeyword("Like") | CaselessKeyword("Is")) + \
                   limited_expression) | \
                   limited_expression
-#bool_expr_item = _bool_expr_item ^ (_bool_expr_item + CaselessKeyword("=") + boolean_literal)
 bool_expr_item.setParseAction(BoolExprItem)
 
 class BoolExpr(VBA_Object):
@@ -2816,14 +3071,17 @@ class BoolExpr(VBA_Object):
         else:
             log.error("BoolExpr: Improperly parsed.")
             return ""
+
+    def _vba_to_python_op(self, op, context):
+        return _vba_to_python_op(op, not context.in_bitwise_expression)
         
     def to_python(self, context, params=None, indent=0):
         r = " " * indent + "("
         if (self.op is not None):
             if (self.lhs is not None):
-                r += to_python(self.lhs, context, params) + " " + _vba_to_python_op(self.op) + " " + to_python(self.rhs, context, params)
+                r += to_python(self.lhs, context, params) + " " + self._vba_to_python_op(self.op, context) + " " + to_python(self.rhs, context, params)
             else:
-                r += _vba_to_python_op(self.op) + " " + to_python(self.rhs, context, params)
+                r += self._vba_to_python_op(self.op, context) + " " + to_python(self.rhs, context, params)
         elif (self.lhs is not None):
             r += to_python(self.lhs, context, params)
         else:
@@ -2910,7 +3168,7 @@ class BoolExpr(VBA_Object):
         else:
             log.error("BoolExpr: Unknown operator boolean %r" % self.op)
             return False
-    
+
 boolean_expression <<= infixNotation(bool_expr_item,
                                      [
                                          (CaselessKeyword("Not"), 1, opAssoc.RIGHT),

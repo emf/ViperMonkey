@@ -823,10 +823,21 @@ class Let_Statement(VBA_Object):
             if (py_var.startswith(".")):
                 py_var = py_var[1:]
             index = to_python(self.index, context, params=params)
+            indices = [index]
+            if (self.index1 is not None):
+                indices.append(to_python(self.index1, context, params=params))
             val = to_python(self.expression, context, params=params)
             op = str(self.op)
+            index_str = ""
+            first = True
+            for i in indices:
+                if (not first):
+                    index_str += ", "
+                first = False
+                index_str += i
+            index_str = "[" + index_str + "]"
             if (op == "="):
-                r = py_var + " = update_array(" + py_var + ", " + index + ", " + val + ")"
+                r = py_var + " = update_array(" + py_var + ", " + index_str + ", " + val + ")"
             else:
                 r = py_var + "[" + index + "] " + op + " " + val
 
@@ -1537,7 +1548,10 @@ class For_Statement(VBA_Object):
         loop_body += indent_str + " " * 4 + "if (int(float(" + loop_var + ")/(" + end_var + " if " + end_var + " != 0 else 1)*100) == " + prog_var + "):\n"
         loop_body += indent_str + " " * 8 + "safe_print(str(int(float(" + loop_var + ")/(" + end_var + " if " + end_var + " != 0 else 1)*100)) + \"% done with loop " + str(self) + "\")\n"
         loop_body += indent_str + " " * 8 + prog_var + " += 1\n"
-        loop_body += to_python(self.statements, tmp_context, params=params, indent=indent+4, statements=True)
+        body_str = to_python(self.statements, tmp_context, params=params, indent=indent+4, statements=True)
+        if (body_str.strip() == '""'):
+            body_str = "\n"
+        loop_body += body_str
         # --while
         loop_body += indent_str + " " * 4 + loop_var + " += " + str(step) + "\n"
         
@@ -1693,10 +1707,16 @@ class For_Statement(VBA_Object):
         if (op not in ['+', '-', '*']):
             return (None, None)
 
+        # Skip loops where the computation depends on the loop
+        # index.
+        for f in fields[2:]:
+            if (f.strip() == str(self.name).strip()):
+                return (None, None)
+                
         # Figure out the value to use to change the variable in the loop.
         expr_str = ""
         for e in fields[4:]:
-            expr_str += e
+            expr_str += " " + e
         num = None
         try:
             expr = expression.parseString(expr_str, parseAll=True)[0]
@@ -1709,6 +1729,7 @@ class For_Statement(VBA_Object):
             return (None, None)
         
         # Get the initial value of variable being modified in the loop.
+        print num
         init_val = None
         try:
 
@@ -3548,7 +3569,8 @@ bad_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression 
                                     Group(statement_block('statements')))
                           )
 
-_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + Suppress(Optional(EOS)) + \
+#_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + Suppress(Optional(EOS)) + \
+_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + \
                                    Group(simple_statements_line('statements')) )  + \
                                    ZeroOrMore(
                                        Group( CaselessKeyword("ElseIf").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + \
@@ -3647,11 +3669,40 @@ class Call_Statement(VBA_Object):
     def __repr__(self):
         return 'Call_Statement: %s(%r)' % (self.name, self.params)
 
+    def _to_python_handle_with_calls(self, context, indent):
+
+        # Is this a call like '.WriteText "foo"'?
+        func_name = str(self.name).strip()
+        if (not func_name.startswith(".")):
+            return None
+
+        # We have a call to a function whose name starts with '.'. Are
+        # we in a With block?
+        if (len(context.with_prefix) == 0):
+            return None
+
+        # We have a method call of the With object. Make a member
+        # access expression representing the method call of the
+        # With object.
+        tmp_var = SimpleNameExpression(None, None, None, name=str(context.with_prefix_raw))
+        call_obj = Function_Call(None, None, None, old_call=self)
+        call_obj.name = func_name[1:] # Get rid of initial '.'
+        full_expr = MemberAccessExpression(None, None, None, raw_fields=(tmp_var, [call_obj], []))
+        
+        # Get python code for the fully qualified object method call.
+        r = to_python(full_expr, context, indent=indent)
+        return r
+    
     def to_python(self, context, params=None, indent=0):
         """
         Convert this call to Python code.
         """
 
+        # With block call statement?
+        with_call_str = self._to_python_handle_with_calls(context, indent)
+        if (with_call_str is not None):
+            return with_call_str
+        
         # Get a list of the Python expressions for each parameter.
         py_params = []
         for p in self.params:
@@ -3727,7 +3778,7 @@ class Call_Statement(VBA_Object):
         call_obj = Function_Call(None, None, None, old_call=self)
         call_obj.name = func_name[1:] # Get rid of initial '.'
         full_expr = MemberAccessExpression(None, None, None, raw_fields=(context.with_prefix, [call_obj], []))
-
+        
         # Evaluate the fully qualified object method call.
         r = eval_arg(full_expr, context)
         return r
@@ -4169,10 +4220,24 @@ class With_Statement(VBA_Object):
 
     def to_python(self, context, params=None, indent=0):
 
-        # For now just convert the with body to Python and hope for the best.
+        # Currently we are only supporting JIT emulation of With blocks
+        # based on Scripting.Dictionary. Is that what we have?
+        with_dict = None
+        if ((context.with_prefix_raw is not None) and
+            (context.contains(str(context.with_prefix_raw)))):
+            with_dict = context.get(str(context.with_prefix_raw))
+            if (not isinstance(with_dict, dict)):
+                with_dict = None
+        if (with_dict is None):
+            return "ERROR: Only doing JIT on Scripting.Dictionary With blocks."
+
+        # Save the dict representing the Scripting.Dictionary.
         r = ""
         indent_str = " " * indent
         r += indent_str + "# With block: " + str(self).replace("\\n", "\\\\n")[:50] + "...\n"
+        r += indent_str + "with_dict = " + str(with_dict) + "\n"
+        
+        # Convert the with body to Python.
         r += to_python(self.body, context, indent=indent, statements=True)
 
         # Done.
@@ -4189,6 +4254,7 @@ class With_Statement(VBA_Object):
         prefix_val = eval_arg(self.env, context)
 
         # Track the with prefix.
+        context.with_prefix_raw = self.env
         if (len(context.with_prefix) > 0):
             context.with_prefix += "." + str(self.env)
             #context.with_prefix += "." + str(prefix_val)
@@ -4231,6 +4297,7 @@ class With_Statement(VBA_Object):
             log.debug("END WITH")
             
         # Remove the current with prefix.
+        context.with_prefix_raw = None
         if ("." not in context.with_prefix):
             context.with_prefix = ""
         else:
@@ -4241,7 +4308,7 @@ class With_Statement(VBA_Object):
         # Run the error handler if we have one and we broke out of the statement
         # loop with an error.
         context.handle_error(params)
-            
+        
         return
 
 # With statement
@@ -4968,6 +5035,71 @@ orphaned_marker = Suppress((CaselessKeyword("End") + CaselessKeyword("Function")
                            (CaselessKeyword("End") + CaselessKeyword("Sub")))
 orphaned_marker.setParseAction(Orphaned_Marker)
 
+# --- Enum Statement ----------------------------------------------------------
+# 
+# Enum SecurityLevel 
+#  IllegalEntry = -1 
+#  SecurityLevel1 = 0 
+#  SecurityLevel2 = 1 
+# End Enum 
+#
+# Enum flxMask
+#    [Ampersand (&)] = 1
+#    UpperA = 2
+#    LowerA = 3
+#    UpperC = 4
+#    LowerC = 5
+#    [Number Sign (#)] = 6
+#    [Nine Sign (9)] = 7
+#    [Question Mark (?)] = 8
+#    NoPos = 9
+#    [DecPoint (.)] = 10
+# End Enum
+#
+# Enum CarType
+#   Sedan         'Value = 0
+#   HatchBack = 2 'Value = 2
+#   SUV = 10      'Value = 10
+#   Truck         'Value = 11
+# End Enum
+
+class EnumStatement(VBA_Object):
+
+    def __init__(self, original_str, location, tokens):
+        super(EnumStatement, self).__init__(original_str, location, tokens)
+        self.name = str(tokens[0])
+        self.values = []
+        pos = 0
+        enum_vals = tokens[1]
+        last_val = -1
+        for enum_val in enum_vals:
+            last_val += 1
+            if (len(enum_val) == 2):
+                last_val = enum_val[1]
+            self.values.append((str(enum_val[0]), last_val))
+                
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug('parsed %r as Enum_Statement' % self)
+
+    def __repr__(self):
+        r = "Enum " + self.name + "\\n"
+        for enum_val in self.values:
+            r += "  " + enum_val[0] + " = " + str(enum_val[1]) + " \\n"
+        r += "End Enum"
+        return r
+
+    def eval(self, context, params=None):
+
+        # Add the enum values as variables to the context.
+        for enum_val in self.values:
+            context.set(enum_val[0], enum_val[1], force_global=True)
+
+enum_value = Group((lex_identifier | enum_val_id)("name") + Optional(Suppress(Literal("=")) + decimal_literal("value")))
+enum_statement = Suppress(CaselessKeyword("Enum")) + lex_identifier("enum_name") + Suppress(EOS) + \
+                 Group(OneOrMore(enum_value + Suppress(EOS))("enum_values")) + \
+                 Suppress(CaselessKeyword("End")) + Suppress(CaselessKeyword("Enum"))
+enum_statement.setParseAction(EnumStatement)
+    
 # WARNING: This is a NASTY hack to handle a cyclic import problem between procedures and
 # statements. To allow local function/sub definitions the grammar elements from procedure are
 # needed here in statements. But, procedures also needs the grammar elements defined here in
@@ -4988,12 +5120,15 @@ def extend_statement_grammar():
                   line_input_statement | simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | \
                   with_statement| simple_statement | rem_statement | \
                   (procedures.simple_function ^ orphaned_marker) | (procedures.simple_sub ^ orphaned_marker) | \
-                  name_statement | stop_statement
+                  name_statement | stop_statement | enum_statement
+
     statement_no_orphan <<= try_catch | type_declaration | simple_for_statement | real_simple_for_each_statement | simple_if_statement | \
                             line_input_statement | simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | \
-                            with_statement| simple_statement | rem_statement | procedures.simple_function | procedures.simple_sub | name_statement | stop_statement 
+                            with_statement| simple_statement | rem_statement | procedures.simple_function | procedures.simple_sub | name_statement | stop_statement | \
+                            enum_statement
+
     statement_restricted <<= try_catch | type_declaration | simple_for_statement | real_simple_for_each_statement | simple_if_statement | \
                              line_input_statement | simple_if_statement_macro | simple_while_statement | simple_do_statement | simple_select_statement | name_statement | \
                              with_statement| simple_statement_restricted | rem_statement | \
-                             procedures.simple_function | procedures.simple_sub | stop_statement
+                             procedures.simple_function | procedures.simple_sub | stop_statement | enum_statement
 

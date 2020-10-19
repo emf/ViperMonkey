@@ -49,14 +49,14 @@ import olefile
 from logger import log
 import filetype
 
-def is_garbage_vba(vba):
+def is_garbage_vba(vba, test_all=False, bad_pct=.6):
     """
     Check to see if the given supposed VBA is actually just a bunch of non-ASCII characters.
     """
 
     # See if the 1st % of the string is mostly bad or mostly good.
     total_len = len(vba)
-    if (total_len > 50000):
+    if ((total_len > 50000) and (not test_all)):
         total_len = int(len(vba) * .25)
     if (total_len == 0):
         return False
@@ -71,8 +71,8 @@ def is_garbage_vba(vba):
         if (c not in string.printable):
             num_bad += 1
 
-    # It's bad if > 60% of the 1st % of the string is garbage.    
-    return ((num_bad/total_len) > .6)
+    # It's bad if > NN% of the 1st % of the string is garbage.
+    return ((num_bad/total_len) > bad_pct)
 
 def pull_base64(data):
     """
@@ -1163,7 +1163,21 @@ def get_ole_text_method_1(vba_code, data, debug=False):
            replace("ed Object", "").\
            replace("d Object", "").\
            replace("jd\x00\x00", "\x00").\
-           replace("\x00\x00", "\x00")
+           replace("\x00\x00", "\x00").\
+           replace("\x0c%", "")
+    if (re.search(r"\x00.%([^\x00])\x00", data) is not None):
+        data = re.sub(r"\x00.%([^\x00])\x00", "\x00\\1\x00", data)
+    data = data.replace("\r", "__CARRIAGE_RETURN__")
+    data = data.replace("\n", "__LINE_FEED__")
+    if (re.search(r"\x00([ -~])[^ -~\x00]([ -~])\x00", data) is not None):
+        data = re.sub(r"\x00([ -~])[^ -~\x00]([ -~])\x00", "\x00\\1\x00\\2\x00", data)
+    if (re.search(r"\x00[ -~]{2}([ -~])\x00", data) is not None):
+        data = re.sub(r"\x00[ -~]{2}([ -~])\x00", "\x00\\1\x00", data)
+    data = re.sub(r"\x00[^ -~]", "", data)
+    if (re.search(r"\x00([ -~])[^ -~\x00]([ -~])\x00", data) is not None):
+        data = re.sub(r"\x00([ -~])[^ -~\x00]([ -~])\x00", "\x00\\1\x00\\2\x00", data)
+    data = data.replace("__CARRIAGE_RETURN__", "\r")
+    data = data.replace("__LINE_FEED__", "\n")
     if debug1:
         print data
         print "\n\n\n"
@@ -1260,20 +1274,40 @@ def get_ole_text_method_1(vba_code, data, debug=False):
             first_half_rep = None
             second_half_rep = None
             got_match = False
-            #print "CHECK !!!!!!!!!!!!!"
-            for i in range(1, len(repeated_subst) + 1):
-                curr_first_half = repeated_subst[:i]
-                #print "++++"
-                #print curr_first_half
-                if aggregate_str.endswith(curr_first_half):
-                    first_half_rep = curr_first_half
-                    second_half_rep = repeated_subst[i:]
+            matched_agg_str = ""
+            # Might have extra characters on the end of the aggregate string.
+            # Walk back from the end of the string trying to match up the
+            # repeated string chunks.
+            for end_pos in range(0, 3):
+                if debug1:
+                    print "CHECK !!!!!!!!!!!!!"
+                    print "chopping off " + str(end_pos)
+                curr_agg_str = aggregate_str[:-end_pos]
+                for i in range(1, len(repeated_subst) + 1):
+                    curr_first_half = repeated_subst[:i]
+                    if debug1:
+                        print "++++"
+                        print "curr 1st half"
+                        print curr_first_half
+                        print "curr 1st half string end"
+                        print curr_agg_str[-len(curr_first_half):]
+                    if (curr_agg_str.endswith(curr_first_half) and
+                        (len(curr_agg_str) > len(matched_agg_str))):
+                        if debug1:
+                            print "MATCH!!"
+                        matched_agg_str = curr_agg_str
+                        first_half_rep = curr_first_half
+                        second_half_rep = repeated_subst[i:]
 
             # Repeated string not split up (1st string ends with repeated string)?
             if (first_half_rep == repeated_subst):
                 first_half_rep = None
                 second_half_rep = None
-                    
+
+            # Handle chopping garbage characters from the end of the aggregate string.
+            if (matched_agg_str != ""):
+                aggregate_str = matched_agg_str
+                
             # There could be extra characters in front of the 2nd half of the string.
             if (first_half_rep is not None):
 
@@ -1446,7 +1480,7 @@ def get_ole_textbox_values(obj, vba_code):
             sys.exit(0)
         return []
 
-    pat = r"(?:[\x20-\x7e]{3,})|(?:(?:(?:\x00|\xff)[\x20-\x7e]){3,})"
+    pat = r"(?:(?:[\x20-\x7e]|\r?\n){3,})|(?:(?:(?:\x00|\xff)(?:[\x20-\x7e]|\r?\n)){3,})"
     index = 0
     r = []
     found_names = set()
@@ -1489,7 +1523,7 @@ def get_ole_textbox_values(obj, vba_code):
         else:
 
             # Jump an arbitrary amount ahead.
-            end = index + 25000
+            end = index + 2500000
             if (end > len(data)):
                 end = len(data) - 1
 

@@ -575,6 +575,16 @@ class MultiOp(VBA_Object):
         self.operators = tokens[0][1::2]
 
     def to_python(self, context, params=None, indent=0):
+
+        # We are generating Python code for some string or numeric
+        # expression. Therefore any boolean operators we find in the
+        # expression are actually bitwise operators.
+        # Track that in the context.
+        set_flag = False
+        if (not context.in_bitwise_expression):
+            context.in_bitwise_expression = True
+            set_flag = True
+            
         if (self.operators[0] == "+"):
             ret = [to_python(self.arg[0], context, params=params)]
         else:
@@ -584,13 +594,30 @@ class MultiOp(VBA_Object):
                 ret.append(' {} {!s}'.format(operator, to_python(arg, context, params=params)))
             else:
                 ret.append(' {} {!s}'.format(operator, "coerce_to_num(" + to_python(arg, context, params=params) + ")"))
+
+        # Out of the string/numeric expression. Might have actual boolean
+        # expressions now.
+        if set_flag:
+            context.in_bitwise_expression = False
+
         return '({})'.format(''.join(ret))
         
     def eval(self, context, params=None):
 
+        # We are emulating some string or numeric
+        # expression. Therefore any boolean operators we find in the
+        # expression are actually bitwise operators.
+        # Track that in the context.
+        set_flag = False
+        if (not context.in_bitwise_expression):
+            context.in_bitwise_expression = True
+            set_flag = True
+        
         # The wildcard for matching propagates through operations.
         evaluated_args = eval_args(self.arg, context)
         if ((isinstance(evaluated_args, Iterable)) and ("**MATCH ANY**" in evaluated_args)):
+            if set_flag:
+                context.in_bitwise_expression = False
             return "**MATCH ANY**"
 
         try:
@@ -601,6 +628,8 @@ class MultiOp(VBA_Object):
                     ret = self.operator_map[operator](ret, arg)
                 except OverflowError:
                     log.error("overflow trying eval: %r" % str(self))
+            if set_flag:
+                context.in_bitwise_expression = False
             return ret
         except (TypeError, ValueError):
             # Try converting strings to ints.
@@ -610,15 +639,23 @@ class MultiOp(VBA_Object):
                 ret = args[0]
                 for operator, arg in zip(self.operators, args[1:]):
                     ret = self.operator_map[operator](ret, arg)
+                if set_flag:
+                    context.in_bitwise_expression = False
                 return ret
             except ZeroDivisionError:
                 context.set_error("Division by 0 error. Returning 'NULL'.")
+                if set_flag:
+                    context.in_bitwise_expression = False
                 return 'NULL'
             except Exception as e:
                 log.error('Impossible to operate on arguments of different types. ' + str(e))
+                if set_flag:
+                    context.in_bitwise_expression = False
                 return 0
         except ZeroDivisionError:
             context.set_error("Division by 0 error. Returning 'NULL'.")
+            if set_flag:
+                context.in_bitwise_expression = False
             return 'NULL'
 
     def __repr__(self):
