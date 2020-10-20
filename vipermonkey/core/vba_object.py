@@ -1061,8 +1061,8 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         try:
             for updated_var in var_updates.keys():
                 context.set(updated_var, var_updates[updated_var])
-        except:
-            log.info("no var_updates returned from JIT")
+        except (NameError, UnboundLocalError):
+            log.warning("No variables set by Python JIT code.")
 
     except NotImplementedError as e:
         log.error("JIT emulation failed. " + str(e))
