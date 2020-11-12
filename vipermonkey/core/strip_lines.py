@@ -383,7 +383,20 @@ def fix_multiple_assignments(line):
 
     # Skip comments.
     if ("'" in line):
-        line = line[:line.index("'")]
+
+        # Make sure the "'" is not in a string.
+        in_str = False
+        quote_pos = None
+        curr_pos = -1
+        for c in line:
+            curr_pos += 1
+            if (c == '"'):
+                in_str = not in_str
+            if ((c == "'") and (not in_str)):
+                quote_pos = curr_pos
+                break
+        if (quote_pos is not None):
+            line = line[:quote_pos]
     
     # Pull out multiple assignments and the final assignment value.
     items = re.findall(MULT_ASSIGN_RE, line)
@@ -877,7 +890,7 @@ def convert_colons_to_linefeeds(vba_code):
         return vba_code
     
     # Track the characters that start and end blocks of text we won't change.
-    marker_chars = [('"', '"'), ('[', ']'), ("'", '\n'), ('#', '#'), ("If ", "\n")]
+    marker_chars = [('"', '"', None), ('[', ']', None), ("'", '\n', None), ('#', '#', None), ("If ", "Then", "End If")]
 
     # Loop through the text leaving some blocks unchanged and others with ':' changed to '\n'.
     pos = 0
@@ -890,15 +903,22 @@ def convert_colons_to_linefeeds(vba_code):
         use_start_marker = None
         use_end_marker = None
         found_marker = False
-        for marker, end_marker in marker_chars:
+        for marker, end_marker, not_marker in marker_chars:
 
             # Do we have an unchangeable block?
-            if (marker in vba_code[pos:]):
-
+            if (marker in vba_code[pos:]):                    
+                
                 # Is this the most recent marker found?
-                found_marker = True
                 curr_marker_pos1 = vba_code[pos:].index(marker) + pos
                 if (curr_marker_pos1 < marker_pos1):
+
+                    # Make sure this is not a disallowed marker.
+                    if ((not_marker is not None) and (len(not_marker) < curr_marker_pos1)):
+                        prev_text = vba_code[curr_marker_pos1 - (len(not_marker) - len(marker) + 1):curr_marker_pos1 + 2]
+                        if (prev_text == not_marker):
+                            continue
+
+                    found_marker = True
                     marker_pos1 = curr_marker_pos1
                     use_end_marker = end_marker
                     use_start_marker = marker
@@ -910,9 +930,9 @@ def convert_colons_to_linefeeds(vba_code):
             change_chunk = vba_code[pos:marker_pos1+1]
             change_chunk = change_chunk.replace(":", "\n")
             # 'a&"ff"'
-            change_chunk = re.sub(r"([\w_])&\"", r"\1 & \"", change_chunk)
+            change_chunk = re.sub(r"([\w_])&\"", r"\1 & " + "\"", change_chunk)
             # '"gg"&"ff"'
-            change_chunk = re.sub(r"\"&\"", r"\" & \"", change_chunk)
+            change_chunk = re.sub(r"\"&\"", r"\" & " + "\"", change_chunk)
 
             # Find the chunk of text to leave alone.
             marker_pos2a = len(vba_code)
@@ -1025,11 +1045,6 @@ def fix_difficult_code(vba_code):
         print "HERE: 2.7"
         print vba_code
     vba_code = fix_varptr_calls(vba_code)
-    # Bad double quotes.
-    #print "HERE: 2"
-    #vba_code = vba_code.replace("\xe2\x80", '"')
-    #vba_code = vba_code.replace('\234"', '"')
-    #vba_code = vba_code.replace('"\235', '"')
 
     # Not handling array accesses more than 2 deep.
     uni_vba_code = u""
@@ -1084,41 +1099,6 @@ def fix_difficult_code(vba_code):
             print "HERE: 6.1"
         vba_code = re.sub(namespace_pat, r"\1", vba_code)
     
-    # We don't handle boolean expressions treated as integers. Comment them out.
-    """
-    uni_vba_code = u""
-    try:
-        uni_vba_code = vba_code.decode("utf-8")
-    except UnicodeDecodeError:
-        log.warning("Converting VB code to unicode failed.")
-    if debug_strip:
-        print "HERE: 7"
-        print vba_code
-    bad_bool_pat = r"\n\s*(?:(?:\w+(?:\(.+\))?(?:\.\w+)?\s*=)|Call)\s*[^" + r'"' + r"][^\n:']+[<>=]"
-    if (re2.search(unicode(bad_bool_pat), uni_vba_code) is not None):
-        bad_exps = re.findall(bad_bool_pat, vba_code)
-        for bad_exp in bad_exps:
-
-            # Don't count matches where the [<>=] is in a string literal.
-            if ('"' in bad_exp):
-                tmp_exp = hide_string_content(bad_exp)
-                if (re.search(bad_bool_pat, tmp_exp) is None):
-                    continue
-
-            # Don't count multi-variable assignments.
-            multi_pat = r"(?:\w+ *= *){2,}"
-            if (re.search(multi_pat, bad_exp) is not None):
-                continue
-
-            # Don't count if this is obviously only assigning a boolean expression.
-            if (re.search(r"[\+\-\*/\^]", bad_exp) is None):
-                continue
-            
-            # This is actually an integer expression with boolean logic.
-            # Not handled.
-            vba_code = vba_code.replace(bad_exp, "\n' UNHANDLED BOOLEAN INT EXPRESSION " + bad_exp[1:])
-    """
-
     # Comments like 'ddffd' at the end of an Else line are hard to parse.
     # Get rid of them.
     uni_vba_code = u""
@@ -1145,6 +1125,7 @@ def fix_difficult_code(vba_code):
         ("&" not in vba_code) and
         ("^" not in vba_code) and
         ("Rem " not in vba_code) and
+        ("rem " not in vba_code) and
         ("REM " not in vba_code) and
         ("MultiByteToWideChar" not in vba_code) and
         (re.match(r".*[\x7f-\xff].*", vba_code, re.DOTALL) is None) and
@@ -1255,6 +1236,8 @@ def fix_difficult_code(vba_code):
     vba_code = vba_code.replace(" Rem ", " ' ")
     vba_code = vba_code.replace("\nREM ", "\n' ")
     vba_code = vba_code.replace(" REM ", " ' ")
+    vba_code = vba_code.replace("\nrem ", "\n' ")
+    vba_code = vba_code.replace(" rem ", " ' ")
 
     # Replace ':' with new lines.
     if debug_strip:
@@ -1527,7 +1510,7 @@ def strip_comments(vba_code):
         if (not curr_line.strip().startswith("'")):
             r += curr_line + "\n"
 
-    # Return extra newlines.
+    # Replace extra newlines.
     r = r.replace("\n\n\n", "\n")
         
     # Return stripped code.
@@ -1591,6 +1574,20 @@ def fix_vba_code(vba_code):
         print "FIX_VBA_CODE: 1"
         print vba_code
     vba_code = strip_comments(vba_code)
+
+    # Remove the last line of code if it looks bad.
+    if ("\n" in vba_code.strip()):
+
+        # Pull out the last line
+        last_line = vba_code[vba_code.strip().rindex("\n") + 1:].strip()
+        if ("'" in last_line):
+            last_line = last_line[:last_line.index("'")]
+
+        # TODO: Expand this badness check as needed.
+        if (last_line.endswith(".")):
+            vba_code = vba_code.strip()
+            vba_code = vba_code[:vba_code.rindex("\n")]
+            vba_code += "\n"
     
     # Fix dumb typo in some maldocs VBA.
     if debug_strip:
@@ -1785,15 +1782,6 @@ def fix_vba_code(vba_code):
         bad_call_pat = "(\r?\n\s*[\w_]{2,50})\""
         if (re2.search(unicode(bad_call_pat), uni_vba_code)):
             vba_code = re.sub(bad_call_pat, r'\1 "', vba_code)
-
-    # Fix rewritten &HFF... assignments.
-    # Should not be needed now.
-    ## ' & H20A'
-    #vba_code = re.sub(r" & (H[\dA-Fa-f])", r" &\1", vba_code)
-    ## ' &H20A &'
-    #vba_code = re.sub(r"(&H[\dA-Fa-f]+) & ", r"\1&", vba_code)
-    ## 'LastRow & ,'
-    #vba_code = re.sub(r"([\w_]+) & ,", r"\1&,", vba_code)
     
     # Skip the next part if unnneeded.
     if debug_strip:
@@ -1914,6 +1902,23 @@ def strip_attribute_lines(vba_code):
             continue
         r += line + "\n"
     return r
+
+def strip_difficult_tuple_lines(vba_code):
+    """
+    Strip all calls like "foo.bar.baz (1,2)-(3,4),5" from the code.
+    They are awful to parse with PyParsing.
+    """
+    if (vba_code is None):
+        return vba_code
+    r = ""
+    tuple_pat = r"[\w_]{1,40}(?:\.[\w_]{1,40})+ +\( *[\w_\d\.]+ *(?:, *[\w_\d]+ *)+\ *\) *[-\+\*/]"
+    for line in vba_code.split("\n"):
+        line = line.strip()
+        if (re.search(tuple_pat, line)):
+            log.warning("Difficult member access expression with tuple arg not handled. Stripping '" + line.strip() + "'.")
+            continue
+        r += line + "\n"
+    return r
         
 external_funcs = []
 def strip_useless_code(vba_code, local_funcs):
@@ -1928,6 +1933,9 @@ def strip_useless_code(vba_code, local_funcs):
 
     # Wipe out all comments.
     vba_code = strip_comments(vba_code)
+
+    # No hard to parse calls with tuple arguments.
+    vba_code = strip_difficult_tuple_lines(vba_code)
     
     # Don't strip lines if Execute() is called since the stripped variables
     # could be used in the execed code strings.

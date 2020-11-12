@@ -461,6 +461,9 @@ class _Chr(VbaLibraryFunc):
 
 class Chr(_Chr):
     pass
+
+class ChrB(_Chr):
+    pass
     
 class ChDir(VbaLibraryFunc):
     """
@@ -550,7 +553,7 @@ class FolderExists(VbaLibraryFunc):
             return False
 
         # Is this a directory that is expected to exist?
-        expected_dirs = set(["c:\\users"])
+        expected_dirs = set(["c:\\users", "c:\\programdata"])
         curr_dir = str(params[0]).lower()
         return ((curr_dir in expected_dirs) or (curr_dir[:-1] in expected_dirs))
 
@@ -1055,8 +1058,12 @@ class Item(BuiltInDocumentProperties):
               (context.contains(str(context.with_prefix_raw)))):
 
             # Get the item index.
-            index = coerce_to_int(params[0])
-            
+            index = None
+            try:
+                index = coerce_to_int(params[0])
+            except:
+                return "NULL"
+
             # Is the With variable value a dict?
             with_dict = context.get(str(context.with_prefix_raw))
             if (not isinstance(with_dict, dict)):
@@ -2073,7 +2080,7 @@ class Paragraphs(VbaLibraryFunc):
             return "NULL"
         
         # Sanity check.
-        if (len(params) == 0):
+        if ((params is None) or (len(params) == 0)):
             log.error("Paragraphs() called with no arguments. Returning all paragraphs.")
             return paragraphs
 
@@ -3422,6 +3429,16 @@ class Put(VbaLibraryFunc):
 
         context.write_file(file_id, data)
 
+class WriteByte(VbaLibraryFunc):
+    """
+    MemoryStream WriteByte() method.
+    """
+
+    def eval(self, context, params=None):
+        if ((params is None) or (len(params) < 1)):
+            return
+        context.report_action('Write Process Memory', str(params), 'MemoryStream.WriteByte', strip_null_bytes=True)
+        
 class WriteLine(VbaLibraryFunc):
     """
     File WriteLine() method.
@@ -3793,14 +3810,14 @@ class CreateObject(VbaLibraryFunc):
         # Track contents of data written to 'ADODB.Stream'.
         obj_type = None
         try:
-            obj_type = str(params[0])
+            obj_type = str(params[0]).lower()
         except UnicodeEncodeError:
             obj_type = filter(isprint, params[0])
-        if (obj_type == 'ADODB.Stream'):
+        if (obj_type == 'ADODB.Stream'.lower()):
             context.open_file('ADODB.Stream')
 
         # Handle certain object types.
-        if (obj_type == "Scripting.Dictionary"):
+        if (obj_type == "Scripting.Dictionary".lower()):
             r = {}
             # Track the added items in order as well as by key.
             r["__ADDED_ITEMS__"] = []
@@ -3810,6 +3827,28 @@ class CreateObject(VbaLibraryFunc):
         # being created.
         return str(obj_type)
 
+class GetParentFolderName(VbaLibraryFunc):
+    """
+    GetParentFolderName() method.
+    """
+
+    def eval(self, context, params=None):
+
+        # Sanity check.
+        if ((params is None) or (len(params) == 0)):
+            return "NULL"
+
+        # Pull the parent directory.
+        curr_dir = str(params[0])
+        if ("\\" in curr_dir):
+            r = curr_dir[:curr_dir.rindex("\\")+1]
+        else:
+            r = "C:\\"
+        return r
+            
+    def num_args(self):
+        return 1
+        
 class ReadText(VbaLibraryFunc):
     """
     ReadText() stream method (stubbed).
@@ -4106,59 +4145,48 @@ class Range(VbaLibraryFunc):
         start_row, start_col = self._get_row_and_column(start)
         end_row, end_col = self._get_row_and_column(end)
 
-        # Reading down a single column?
+        # Read all the cells, in row by row order.
         r = []
-        if (start_col == end_col):
-            next = (end_row - start_row)/abs(end_row - start_row)
-            curr_row = start_row
-            while (curr_row != end_row):
-                val = None
-                try:
-                    val = str(sheet.cell_value(curr_row, start_col))
-                except:
-                    pass
-                if (val is not None):
-                    r.append(val)
-                curr_row += next
-            val = None
-            try:
-                val = str(sheet.cell_value(curr_row, start_col))
-            except:
-                pass
-            if (val is not None):
-                r.append(val)
-
-        # Reading single row?
-        elif (start_row == end_row):
-            next = (end_col - start_col)/abs(end_col - start_col)
+        row_incr = 0
+        if ((end_row - start_row) != 0):
+            row_incr = (end_row - start_row)/abs(end_row - start_row)
+        col_incr = 0
+        if ((end_col - start_col) != 0):
+            col_incr = (end_col - start_col)/abs(end_col - start_col)
+        curr_row = start_row
+	#print "=========== READ CELLS!!! ================"
+        while (curr_row != end_row):
             curr_col = start_col
-            while (curr_col != end_col):
+            while True:
                 val = None
                 try:
-                    val = str(sheet.cell_value(start_row, curr_col))
+                    val = str(sheet.cell_value(curr_row, curr_col))
                 except:
                     pass
                 if (val is not None):
+                    #print "(" + str(curr_row) + ", " + str(curr_col) + ")"
+                    #print "'" + str(val) + "'"
                     r.append(val)
-                curr_col += next
-            val = None
-            try:
-                val = str(sheet.cell_value(start_row, curr_col))
-            except:
-                pass
-            if (val is not None):
-                r.append(val)
-
-        # Not reading single row or column.
-        else:
-            log.warning("Cell range " + cell_str + " does not specify a single row/column. Range() is returing NULL.")
-            return "NULL"
+                if (curr_col == end_col):
+                    break
+                curr_col += col_incr
+            if (curr_row == end_row):
+                break
+            curr_row += row_incr
 
         # Return the cell values.
+        #print "=========== CELLS!!! ================"
+        #print cell_str
+        #print r
+        #sys.exit(0)
         return r
     
     def eval(self, context, params=None):
 
+        # TODO: Need to track the index of each cell for full
+        # emulation of a range. Probably need a Range object
+        # implementation.
+        
         # Sanity check.
         if (params is None):
             log.warning("Range() called with no parameters.")
@@ -4192,9 +4220,10 @@ class Range(VbaLibraryFunc):
             return "NULL"
 
         # Multiple cells?
-        if (":" in str(params[0])):
+        range_index = str(params[0])
+        if (":" in range_index):
             try:
-                return self._read_cell_list(sheet, str(params[0]))
+                return self._read_cell_list(sheet, range_index)
             except Exception as e:
                 context.increase_general_errors()
                 return "NULL"
@@ -4207,7 +4236,7 @@ class Range(VbaLibraryFunc):
             val = str(sheet.cell_value(row, col))
             
             # Return the cell value.
-            log.info("Read cell (" + str(params[0]) + ") from sheet 1 = " + str(val))
+            log.info("Read cell (" + range_index + ") from sheet 1 = " + str(val))
             if (log.getEffectiveLevel() == logging.DEBUG):
                 log.debug("Cell value = '" + val + "'")
             return val            
@@ -4795,7 +4824,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                GetSaveAsFilename, ChDir, ExecuteExcel4Macro, VarPtr, WriteText, FileCopy,
                WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2,
                Chr, CopyFile, GetFile, Paragraphs, UsedRange, CountA, SpecialCells,
-               RandBetween, Items, Count):
+               RandBetween, Items, Count, GetParentFolderName, WriteByte, ChrB):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

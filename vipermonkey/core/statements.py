@@ -499,7 +499,7 @@ class Dim_Statement(VBA_Object):
         self.variables = tmp_vars
         
         if (log.getEffectiveLevel() == logging.DEBUG):
-            log.debug('parsed %r' % str(self))
+            log.debug('parsed %r as Dim_Statement' % str(self))
 
     def __repr__(self):
         r = "Dim "
@@ -1729,7 +1729,6 @@ class For_Statement(VBA_Object):
             return (None, None)
         
         # Get the initial value of variable being modified in the loop.
-        print num
         init_val = None
         try:
 
@@ -3569,7 +3568,6 @@ bad_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression 
                                     Group(statement_block('statements')))
                           )
 
-#_single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + Suppress(Optional(EOS)) + \
 _single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_expression + CaselessKeyword("Then").suppress() + \
                                    Group(simple_statements_line('statements')) )  + \
                                    ZeroOrMore(
@@ -3579,7 +3577,7 @@ _single_line_if_statement = Group( CaselessKeyword("If").suppress() + boolean_ex
                                    Optional(
                                        (Group(CaselessKeyword("Else").suppress() + Group(simple_statements_line('statements'))) ^
                                         Group(CaselessKeyword("Else").suppress()))
-                                   ) + Suppress(Optional(CaselessKeyword("End") + CaselessKeyword("If")))
+                                   ) + Suppress(Optional(Optional(Literal(":")) + CaselessKeyword("End") + CaselessKeyword("If")))
 single_line_if_statement = _single_line_if_statement
 single_line_if_statement.setParseAction(If_Statement)
 
@@ -3642,7 +3640,8 @@ class Call_Statement(VBA_Object):
     log_funcs = ["CreateProcessA", "CreateProcessW", "CreateProcess", ".run", "CreateObject",
                  "Open", ".Open", "GetObject", "Create", ".Create", "Environ",
                  "CreateTextFile", ".CreateTextFile", ".Eval", "Run",
-                 "SetExpandedStringValue", "WinExec", "FileCopy", "Load"]
+                 "SetExpandedStringValue", "WinExec", "FileCopy", "Load",
+                 "FolderExists", "FileExists"]
     
     def __init__(self, original_str, location, tokens, name=None, params=None):
         super(Call_Statement, self).__init__(original_str, location, tokens)
@@ -3867,6 +3866,10 @@ class Call_Statement(VBA_Object):
         # Emulate the function body.
         try:
 
+            # Pull out the function name if referenced via a module, etc.
+            if ("." in func_name):
+                func_name = func_name[func_name.index(".") + 1:]
+            
             # Get the function.
             s = context.get(func_name)
             if (s is None):
@@ -3995,7 +3998,7 @@ call_statement1 = NotAny(known_keywords_statement_start) + \
 call_statement0.setParseAction(Call_Statement)
 call_statement1.setParseAction(Call_Statement)
 
-call_statement = (call_statement0 ^ call_statement1)
+call_statement = (call_statement1 ^ call_statement0)
 
 # --- EXIT FOR statement ----------------------------------------------------------
 
@@ -4057,8 +4060,8 @@ class Exit_Function_Statement(VBA_Object):
 # Return from a function.
 exit_func_statement = (CaselessKeyword('Exit').suppress() + CaselessKeyword('Function').suppress()) | \
                       (CaselessKeyword('Exit').suppress() + CaselessKeyword('Sub').suppress()) | \
-                      (CaselessKeyword('Return').suppress()) | \
-                      ((CaselessKeyword('End').suppress()) + ~CaselessKeyword("Function"))
+                      (CaselessKeyword('Return').suppress()) #| \
+#                      ((CaselessKeyword('End').suppress()) + ~CaselessKeyword("Function"))
 exit_func_statement.setParseAction(Exit_Function_Statement)
 
 # --- REDIM statement ----------------------------------------------------------
@@ -4499,16 +4502,18 @@ class File_Open(VBA_Object):
             return
         
         # Get the file name.
-
-        # Might be an expression.
-        name = eval_arg(self.file_name, context=context)
-        try:
-            # Could be a variable.
-            name = context.get(self.file_name)
-        except KeyError:
-            pass
-        except AssertionError:
-            pass
+        name = self.file_name
+        
+        # Eval the name if it is not obviously a path.
+        if (not str(name).lower().startswith("c:")):
+            name = eval_arg(self.file_name, context=context)
+            try:
+                # Could be a variable.
+                name = context.get(self.file_name)
+            except KeyError:
+                pass
+            except AssertionError:
+                pass
 
         # Store file id variable in context.
         file_id = ""
@@ -5094,8 +5099,9 @@ class EnumStatement(VBA_Object):
         for enum_val in self.values:
             context.set(enum_val[0], enum_val[1], force_global=True)
 
-enum_value = Group((lex_identifier | enum_val_id)("name") + Optional(Suppress(Literal("=")) + decimal_literal("value")))
-enum_statement = Suppress(CaselessKeyword("Enum")) + lex_identifier("enum_name") + Suppress(EOS) + \
+enum_value = Group((lex_identifier | enum_val_id)("name") + Optional(Suppress(Literal("=")) + integer("value")))
+enum_statement = Suppress(Optional(CaselessKeyword('Public') | CaselessKeyword('Private'))) + \
+                 Suppress(CaselessKeyword("Enum")) + lex_identifier("enum_name") + Suppress(EOS) + \
                  Group(OneOrMore(enum_value + Suppress(EOS))("enum_values")) + \
                  Suppress(CaselessKeyword("End")) + Suppress(CaselessKeyword("Enum"))
 enum_statement.setParseAction(EnumStatement)

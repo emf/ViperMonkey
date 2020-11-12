@@ -84,14 +84,14 @@ class Sub(VBA_Object):
     def to_python(self, context, params=None, indent=0):
 
         # Get the global variables read in the function body.
-        tmp_context = Context(context=context)
+        tmp_context = Context(context=context, _locals=context.locals, copy_globals=True)
         global_var_info, _ = _get_var_vals(self, tmp_context, global_only=True)
         
         # Set up the initial values for the global variables.
         global_var_init_str = ""
         indent_str = " " * indent
         for global_var in global_var_info.keys():
-            val = global_var_info[global_var]
+            val = to_python(global_var_info[global_var], context)
             global_var_init_str += indent_str + str(global_var) + " = " + str(val) + "\n"
 
         # Make a copy of the context so we can mark variables as function
@@ -440,14 +440,14 @@ class Function(VBA_Object):
     def to_python(self, context, params=None, indent=0):
         
         # Get the global variables read in the function body.
-        tmp_context = Context(context=context)
+        tmp_context = Context(context=context, _locals=context.locals, copy_globals=True)
         global_var_info, _ = _get_var_vals(self, tmp_context, global_only=True)
         
         # Set up the initial values for the global variables.
         global_var_init_str = ""
         indent_str = " " * indent
         for global_var in global_var_info.keys():
-            val = global_var_info[global_var]
+            val = to_python(global_var_info[global_var], context)
             global_var_init_str += indent_str + str(global_var) + " = " + str(val) + "\n"
         
         # Make a copy of the context so we can mark variables as function
@@ -572,10 +572,11 @@ class Function(VBA_Object):
             # Add the parameter value to the local function context.
             if (log.getEffectiveLevel() == logging.DEBUG):
                 log.debug('Function %s: setting param %s = %r' % (self.name, param_name, param_value))
+
             # Handle params with default values.
             if ((param_name not in call_info) or
                 (call_info[param_name] == ('', None)) or
-                (param_value != "NULL")):
+                (param_value != "")):
                 call_info[param_name] = (param_value, defined_param.my_type)
 
             # Is this a ByRef parameter?

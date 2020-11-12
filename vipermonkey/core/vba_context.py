@@ -90,6 +90,9 @@ out_dir = None  # type: str
 # Track intermediate IOC values stored in variables during emulation.
 intermediate_iocs = set()
 
+# Track the # of base64 IOCs.
+num_b64_iocs = 0
+
 class Context(object):
     """
     a Context object contains the global and local named objects (variables, subs, functions)
@@ -627,6 +630,12 @@ class Context(object):
         # System info.
         self.globals["System.OperatingSystem".lower()] = "Windows NT"
         self.vb_constants.add("System.OperatingSystem".lower())
+        self.globals[".DNSHostName".lower()] = "acomputer.acompany.com"
+        self.vb_constants.add("".lower())
+        self.globals[".Domain".lower()] = "acompany.com"
+        self.vb_constants.add(".Domain".lower())
+        self.globals["wscript.network.UserName".lower()] = "humungulous"
+        self.vb_constants.add("wscript.network.UserName".lower())
 
         # Call type constants.
         self.globals["vbGet".lower()] = 2
@@ -6124,7 +6133,16 @@ class Context(object):
                                   local_only=local_only,
                                   global_only=global_only)
             except KeyError:
-                pass
+
+                # Try with the evaluated with context.
+                tmp_name = str(self.with_prefix) + str(name)
+                try:
+                    return self.__get(tmp_name,
+                                      case_insensitive=case_insensitive,
+                                      local_only=local_only,
+                                      global_only=global_only)
+                except KeyError:
+                    pass
 
         # Now try it without the current with context.
         try:
@@ -6143,7 +6161,14 @@ class Context(object):
                               local_only=local_only,
                               global_only=global_only)
         except KeyError:
-            pass
+
+            # If we are looking for a shapes title we may already have
+            # it.
+            if (isinstance(self.with_prefix, str) and
+                (self.with_prefix_raw is not None) and
+                ("Shapes" in str(self.with_prefix_raw)) and
+                (str(name) == "Title")):
+                return self.with_prefix
         
         # Are we referencing a field in an object?
         if ("." in name):
@@ -6177,7 +6202,44 @@ class Context(object):
                           case_insensitive=case_insensitive,
                           local_only=local_only,
                           global_only=global_only)
+
+    def _get_all_metadata(self, name):
+        """
+        Return all items in something like ActiveDocument.BuiltInDocumentProperties.
+        """
+
+        # Reading all properties?
+        if ((name != "ActiveDocument.BuiltInDocumentProperties") and
+            (name != "ThisDocument.BuiltInDocumentProperties")):
+            return None
+
+        # Get the names of the metadata items.
+        meta_names = [a for a in dir(self.metadata) if not a.startswith('__') and not callable(getattr(self.metadata, a))]
+
+        # Add the names and values of the metadata items to the context.
+        for meta_name in meta_names:
+            self.set(meta_name + ".Name", meta_name, force_global=True)
+            self.set(meta_name + ".Value", getattr(self.metadata, meta_name), force_global=True)
+            self.save_intermediate_iocs(getattr(self.metadata, meta_name))
+
+        # Chuck the comments in there for good measure.
+        meta_names.append("Comments")
+        comments = ""
+        first = True
+        for comment in self.get("ActiveDocument.Comments"):
+            if (not first):
+                comments += "\n"
+            first = False
+            comments += comment
+        self.set("Comments.Name", "Comments", force_global=True)
+        self.set("Comments.Value", comments, force_global=True)
+        self.save_intermediate_iocs(comments)
         
+        # Return the metadata items as a list of their names. Accesses of their .Name and
+        # .Value fields will hit the synthetic variables that were just added to the
+        # context.
+        return meta_names
+    
     def get(self, name, search_wildcard=True, local_only=False, global_only=False):
 
         # Sanity check.
@@ -6195,6 +6257,13 @@ class Context(object):
                     log.debug("Short circuited change handler lookup of " + name)
                 raise KeyError('Object %r not found' % name)
 
+        # Reading all of the document metadata items?
+        r = self._get_all_metadata(name)
+        if (r is not None):
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("Read all metadata items.")
+            return r
+            
         # First try a case sensitive search. If that fails try case insensitive.
         r = None
         try:
@@ -6261,7 +6330,12 @@ class Context(object):
 
         # Are we pulling out all the doc vars?
         if (var == "activedocument.variables"):
-            return self.doc_vars.items()
+
+            # Return these as (name, value) tuples.
+            r = []
+            for var_name in self.doc_vars.keys():
+                r.append((var_name, self.doc_vars[var_name]))                
+            return r
         
         if (var not in self.doc_vars):
 
@@ -6312,6 +6386,14 @@ class Context(object):
         """
         Save variable values that appear to contain base64 encoded or URL IOCs.
         """
+
+        global num_b64_iocs
+        
+        # Strip NULLs and unprintable characters from the potential IOC.
+        from vba_object import strip_nonvb_chars
+        value = strip_nonvb_chars(value)
+        if (len(re.findall(r"NULL", str(value))) > 20):
+            value = str(value).replace("NULL", "")
         
         # Is there a URL in the data?
         got_ioc = False
@@ -6328,13 +6410,15 @@ class Context(object):
                 got_ioc = True
                 log.info("Found possible intermediate IOC (URL): '" + tmp_value + "'")
 
-        # Is there base64 in the data?
-        B64_REGEX = r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
-        b64_strs = re.findall(B64_REGEX, value)
-        for curr_value in b64_strs:
-            if ((value not in intermediate_iocs) and (len(curr_value) > 200)):
-                got_ioc = True
-                log.info("Found possible intermediate IOC (base64): '" + tmp_value + "'")
+        # Is there base64 in the data? Don't track too many base64 IOCs.
+        if (num_b64_iocs < 200):
+            B64_REGEX = r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
+            b64_strs = re.findall(B64_REGEX, value)
+            for curr_value in b64_strs:
+                if ((value not in intermediate_iocs) and (len(curr_value) > 200)):
+                    got_ioc = True
+                    num_b64_iocs += 1
+                    log.info("Found possible intermediate IOC (base64): '" + tmp_value + "'")
 
         # Did we find anything?
         if (not got_ioc):

@@ -116,7 +116,7 @@ from oletools.olevba import VBA_Parser, filter_vba, FileOpenError
 import olefile
 import xlrd
 
-import core.meta
+from core.meta import get_metadata_exif
 
 # add the vipermonkey folder to sys.path (absolute+normalized path):
 _thismodule_dir = os.path.normpath(os.path.abspath(os.path.dirname(__file__)))
@@ -159,7 +159,7 @@ def _read_doc_text_libreoffice(data):
     # Dump all the text using soffice.
     output = None
     try:
-        output = subprocess.check_output(["python3", _thismodule_dir + "/export_doc_text.py",
+        output = subprocess.check_output(["timeout", "30", "python3", _thismodule_dir + "/export_doc_text.py",
                                           "--text", "-f", out_dir])
     except Exception as e:
         log.error("Running export_doc_text.py failed. " + str(e))
@@ -939,7 +939,7 @@ def load_excel_libreoffice(data):
     # Dump all the sheets as CSV files using soffice.
     output = None
     try:
-        output = subprocess.check_output(["python3", _thismodule_dir + "/export_all_excel_sheets.py", out_dir])
+        output = subprocess.check_output(["timeout", "30", "python3", _thismodule_dir + "/export_all_excel_sheets.py", out_dir])
     except Exception as e:
         log.error("Running export_all_excel_sheets.py failed. " + str(e))
         os.remove(out_dir)
@@ -1150,7 +1150,7 @@ def _process_file (filename,
                 vm.set_metadata(ole.get_metadata())
             except Exception as e:
                 log.warning("Reading in metadata failed. Trying fallback. " + str(e))
-                vm.set_metadata(meta.get_metadata_exif(orig_filename))
+                vm.set_metadata(get_metadata_exif(orig_filename))
 
             # If this is an Excel spreadsheet, read it in.
             vm.loaded_excel = load_excel(data)
@@ -1617,7 +1617,13 @@ def _process_file (filename,
             safe_print(vm.dump_actions())
             safe_print('')
             full_iocs = vba_context.intermediate_iocs
-            full_iocs = full_iocs.union(read_ole_fields.pull_base64(data))
+            raw_b64_iocs = read_ole_fields.pull_base64(data)
+            for ioc in raw_b64_iocs:
+                if (vba_context.num_b64_iocs > 200):
+                    log.warning("Found too many potential base64 IOCs. Skipping the rest.")
+                    break
+                full_iocs.add(ioc)
+                vba_context.num_b64_iocs += 1
             tmp_iocs = []
             if (len(full_iocs) > 0):
                 tmp_iocs = _remove_duplicate_iocs(full_iocs)
@@ -1701,7 +1707,7 @@ def process_file_scanexpr (container, filename, data):
                 vm.set_metadata(ole.get_metadata())
             except Exception as e:
                 log.warning("Reading in metadata failed. Trying fallback. " + str(e))
-                vm.set_metadata(meta.get_metadata_exif(orig_filename))
+                vm.set_metadata(get_metadata_exif(orig_filename))
             
             #print 'Contains VBA Macros:'
             for (subfilename, stream_path, vba_filename, vba_code) in vba.extract_macros():

@@ -97,6 +97,7 @@ class VbaLibraryFunc(object):
         return "INTEGER"
 
 def excel_col_letter_to_index(x): 
+    x = x.upper()
     return (reduce(lambda s,a:s*26+ord(a)-ord('A')+1, x, 0) - 1)
 
 def limits_exceeded(throw_error=False):
@@ -564,10 +565,12 @@ def _infer_type_of_expression(expr, context):
     
     # Harder case. This could be an int or a str (or some other numeric type, but
     # we're not handling that).
-    if (isinstance(expr, operators.AddSub)):
+    if (isinstance(expr, operators.AddSub) or
+        isinstance(expr, expressions.BoolExpr) or
+        isinstance(expr, expressions.BoolExprItem)):
 
         # If we are doing subtraction we need numeric types.
-        if ("-" in expr.operators):
+        if ((hasattr(expr, "operators")) and ("-" in expr.operators)):
             #print "POSSIBLE TYPE (5) '" + str(expr) + "' == " + "INTEGER"
             return "INTEGER"
         
@@ -637,7 +640,7 @@ def _get_var_vals(item, context, global_only=False):
     lhs_visitor = lhs_var_visitor()
     item.accept(lhs_visitor, no_embedded_loops=False)
     lhs_var_names = lhs_visitor.variables
-
+    
     # Handle member access expressions.
     var_names = var_names.union(lhs_var_names)
     tmp = set()
@@ -667,10 +670,8 @@ def _get_var_vals(item, context, global_only=False):
             
             # We have been kind of fuzzing the distinction between global and
             # local variables, so tighten down on globals only by just picking
-            # up VB constants.
-            if (global_only and
-                (var not in context.vb_constants) and
-                (var.lower() not in context.vb_constants)):
+            # up global variables that appear on the RHS but not LHS.
+            if (global_only and (var in lhs_var_names)):
                 continue
             
             # Do not set function arguments to new values.
@@ -990,6 +991,10 @@ def _called_funcs_to_python(loop, context, indent):
     r = indent_str + "# VBA Local Function Definitions\n" + r
     return r
 
+# Cache JIT loop results to avoid emulating the exact same loop
+# multiple times.
+jit_cache = {}
+
 def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=None):
     """
     Convert the loop to Python and emulate the loop directly in Python.
@@ -1042,7 +1047,9 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
             
             # Look for non-ASCII strings.
             non_ascii_pat = r'"[^"]*[\x7f-\xff][^"]*"'
-            if (re.search(non_ascii_pat, code_python) is not None):
+            non_ascii_pat1 = r'"[^"]*(?:\\x7f|\\x[89a-f][0-9a-f])[^"]*"'
+            if ((re.search(non_ascii_pat1, code_python) is not None) or
+                (re.search(non_ascii_pat, code_python) is not None)):
                 log.warning("VBA code contains Microsoft specific extended ASCII strings. Not JIT emulating.")
                 return False
 
@@ -1054,7 +1061,17 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
             return False
         
         # Run the Python code.
-        if (namespace is None):
+
+        # Have we already run this exact loop?
+        if (code_python in jit_cache):
+            var_updates = jit_cache[code_python]
+            log.info("Using cached JIT loop results.")
+            if (var_updates == "ERROR"):
+                log.error("Previous run of loop failed.")
+                return False
+
+        # No cached results. Run the loop.
+        elif (namespace is None):
             # Magic. For some reason exec'ing in locals() makes the dynamically generated
             # code recognize functions defined in the dynamic code. I don't know why.
             exec code_python in locals()
@@ -1063,6 +1080,9 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
             var_updates = namespace["var_updates"]
         log.info("Done JIT emulation of '" + code_vba + "...' .")
 
+        # Cache the loop results.
+        jit_cache[code_python] = var_updates
+        
         # Update the context with the variable values from the JIT code execution.
         try:
             for updated_var in var_updates.keys():
@@ -1078,6 +1098,9 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
 
     except Exception as e:
 
+        # Cache the error.
+        jit_cache[code_python] = "ERROR"
+        
         # If we bombed out due to a potential infinite loop we
         # are done.
         if ("Infinite Loop" in str(e)):

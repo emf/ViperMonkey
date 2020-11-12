@@ -100,7 +100,8 @@ def _vba_to_python_op(op, is_boolean):
 
 # --- FILE POINTER -------------------------------------------------
 
-file_pointer = Suppress('#') + (decimal_literal ^ lex_identifier) + NotAny("#")
+#file_pointer = Suppress('#') + (decimal_literal ^ lex_identifier) + NotAny("#")
+file_pointer = Suppress('#') + expression + NotAny("#")
 file_pointer.setParseAction(lambda t: "#" + str(t[0]))
 file_pointer_loose = (decimal_literal ^ lex_identifier)
 file_pointer_loose.setParseAction(lambda t: "#" + str(t[0]))
@@ -910,26 +911,40 @@ class MemberAccessExpression(VBA_Object):
         """
         Handle reading .Name and .Value fields from doc vars.
         """
-
+        
         # Pull out proper RHS.
         if ((isinstance(rhs, list)) and (len(rhs) > 0)):
             rhs = rhs[0]
-        
+        rhs = str(rhs).strip()
+            
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("_handle_docvar_value(): lhs = " + str(lhs) + ", rhs = '" + str(rhs) + "'")
+            
         # Do we have a tuple representing a doc var?
         if (not isinstance(lhs, tuple)):
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("_handle_docvar_value(): LHS not tuple")
             return None
         if (len(lhs) < 2):
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("_handle_docvar_value(): LHS not 2 element tuple")
             return None
         
         # Getting .Name?
         if (rhs == "Name"):
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("_handle_docvar_value(): return name = '" + str(lhs[0]) + "'")
             return lhs[0]
 
         # Getting .Value?
         if (rhs == "Value"):
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("_handle_docvar_value(): return value = '" + str(lhs[1]) + "'")
             return lhs[1]
 
         # Don't know what we are getting.
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("_handle_docvar_value(): not getting name or value of '" + str(self) + "'")
         return None
 
     def _handle_file_close(self, context, lhs, rhs):
@@ -1232,8 +1247,25 @@ class MemberAccessExpression(VBA_Object):
         try:
             val = context.get(var_name)
         except KeyError:
-            return False
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("var_name '" + var_name + "' not found.")
 
+        # If we did not get it from .ReadText try it from .Text
+        if (val == None):
+            var_name = memb_str[:memb_str.lower().index(".savetofile")] + ".text"
+            # Microsoft.XMLDOM.CreateObject('Adodb.Stream').SaveToFile(...
+            if ("CreateObject(" in var_name):
+                var_name = var_name[:var_name.index("CreateObject(")] + ".text"
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("var_name 1 = " + var_name)
+            val = None
+            try:
+                val = context.get(var_name)
+            except KeyError:
+                if (log.getEffectiveLevel() == logging.DEBUG):
+                    log.debug("var_name 1 '" + var_name + "' not found.")
+                return False
+            
         # TODO: Use context.open_file()/write_file()/close_file()
 
         # Make the dropped file directory if needed.
@@ -2101,6 +2133,11 @@ class With_Member_Expression(VBA_Object):
         # Count? Not parsed as a function call...
         if (expr_str == ".Count"):
             return (len(with_dict) - 1)
+
+        # Expression not a function call?
+        if ((not hasattr(self.expr, "name")) or
+            (not hasattr(self.expr, "params"))):
+            return None
         
         # Run the dictionary method call.
         new_exists = Function_Call(None, None, None, old_call=self.expr)
@@ -2166,7 +2203,7 @@ class Function_Call(VBA_Object):
                  "Open", ".Open", "GetObject", "Create", ".Create", "Environ",
                  "CreateTextFile", ".CreateTextFile", ".Eval", "Run",
                  "SetExpandedStringValue", "WinExec", "FileExists", "SaveAs",
-                 "FileCopy", "Load", "ShellExecute"]
+                 "FileCopy", "Load", "ShellExecute", "FolderExists"]
     
     def __init__(self, original_str, location, tokens, old_call=None):
         super(Function_Call, self).__init__(original_str, location, tokens)
@@ -2717,6 +2754,7 @@ literal_list_expression = Forward()
 literal_range_expression = Forward()
 limited_expression = Forward()
 bool_expr_item = Forward()
+tuple_expression = Forward()
 expr_item <<= (
     Optional(CaselessKeyword("ByVal").suppress())
     + (
@@ -2737,6 +2775,7 @@ expr_item <<= (
         | literal_range_expression
         | literal_list_expression
         | Suppress(Literal("(")) + boolean_expression + Suppress(Literal(")"))
+        | tuple_expression
     )
 )
 expr_item_strict <<= (
@@ -3292,3 +3331,30 @@ literal_list_expression.setParseAction(Literal_List_Expression)
 
 literal_range_expression <<= Suppress(Literal("[")) + decimal_literal + Suppress(Literal(":")) + decimal_literal + Suppress(Literal("]"))
 literal_range_expression.setParseAction(lambda t: str(t[0]) + ":" + str(t[1]))
+
+# --- TUPLE EXPRESSION --------------------------------------------------------------
+class Tuple_Expression(VBA_Object):
+
+    def __init__(self, original_str, location, tokens):
+        super(Tuple_Expression, self).__init__(original_str, location, tokens)
+        self.expr_items = tokens.expr_items
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug('parsed %r as Tuple_Expression' % self)
+
+    def __repr__(self):
+        r = "("
+        first = True
+        for i in self.expr_items:
+            if not first:
+                r += ", "
+            first = False
+            r += str(i)
+        r += ")"
+        return r
+
+    def eval(self, context, params=None):
+        # TODO: Fill this in if needed.
+        pass
+
+tuple_expression <<= Suppress(Literal("(")) + (expression + OneOrMore(Suppress(Literal(",")) + expression))("expr_items") + Suppress(Literal(")"))
+tuple_expression.setParseAction(Tuple_Expression)
