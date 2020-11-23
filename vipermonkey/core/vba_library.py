@@ -464,6 +464,9 @@ class Chr(_Chr):
 
 class ChrB(_Chr):
     pass
+
+class ChrW(_Chr):
+    pass
     
 class ChDir(VbaLibraryFunc):
     """
@@ -1767,7 +1770,25 @@ class VarPtr(VbaLibraryFunc):
         # Report on the full byte array given to VarPtr().
         val = params[0]
         context.report_action("External Call", "VarPtr(" + str(val) + ")", "VarPtr", strip_null_bytes=True)
-    
+
+class RtlMoveMemory(VbaLibraryFunc):
+    """
+    External RtlMoveMemory() function.
+    """
+
+    def eval(self, context, params=None):
+        if ((params is None) or (len(params) == 0)):
+            return
+
+        # Report the memory move.
+        context.report_action("External Call", "RtlMoveMemory(" + str(params) + ")", "RtlMoveMemory", strip_null_bytes=True)
+
+        # Track the shellcode bytes.
+        if (len(params) < 3):
+            return
+        import vba_context
+        vba_context.add_shellcode_data(params[0], params[1], params[2])
+        
 class GetByteCount_2(VbaLibraryFunc):
     """
     String encoder object method.
@@ -2231,7 +2252,12 @@ class Join(VbaLibraryFunc):
         r = ""
         if (isinstance(strings, list)):
             for s in strings:
-                r += str(s) + sep
+                tmp_s = None
+                try:
+                    tmp_s = str(s)
+                except UnicodeEncodeError:
+                    tmp_s = filter(isprint, s)
+                r += tmp_s + sep
         else:
             r = str(strings)
         if (log.getEffectiveLevel() == logging.DEBUG):
@@ -4752,7 +4778,13 @@ class WriteProcessMemory(VbaLibraryFunc):
         if ((params is None) or (len(params) < 1)):
             return "NULL"
         context.report_action('Write Process Memory', str(params), 'External Function: kernel32.dll / WriteProcessMemory', strip_null_bytes=True)
-    
+
+        # Track the shellcode bytes.
+        if (len(params) < 4):
+            return
+        import vba_context
+        vba_context.add_shellcode_data(params[1], params[2], params[3])
+        
 class Write(VbaLibraryFunc):
     """
     Write() method.
@@ -4824,7 +4856,8 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                GetSaveAsFilename, ChDir, ExecuteExcel4Macro, VarPtr, WriteText, FileCopy,
                WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2,
                Chr, CopyFile, GetFile, Paragraphs, UsedRange, CountA, SpecialCells,
-               RandBetween, Items, Count, GetParentFolderName, WriteByte, ChrB):
+               RandBetween, Items, Count, GetParentFolderName, WriteByte, ChrB, ChrW,
+               RtlMoveMemory):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 
