@@ -83,6 +83,45 @@ from logger import log
 # TODO: Excel
 # TODO: other MS Office apps?
 
+def member_access(var, field):
+    """
+    Read a field from an object. Used in Python JIT code.
+    """
+
+    # Reading a field from a dict?
+    field = str(field)
+    if (isinstance(var, dict)):
+        if (field in var):
+            return var[field]
+        elif (field.lower() in var):
+            return var[field.lower()]
+        else:
+            return "NULL"
+
+    # Punt and just see if we can return the value of a variable
+    # with the same name as the field.
+    if (field in locals()):
+        return locals[field]
+    elif (field in globals()):
+        return globals[field]
+    else:
+        return "NULL"
+
+# This function is here to ensure that we return the same global
+# shellcode variable as what is updated by emulated VBA functions
+# defined in this file.
+def get_raw_shellcode_data():
+    import vba_context
+    return vba_context.shellcode
+    
+def run_external_function(func_name, context, params, lib_info):
+    """
+    Fake running an external DLL function with the given parameters.
+    """
+    call_str = str(func_name) + "(" + str(params) + ")"
+    context.report_action('External Call', call_str, lib_info)
+    return 1
+    
 def run_function(func_name, context, params):
     """
     Run a VBA library function with the given parameters.
@@ -1211,26 +1250,39 @@ class Eval(VbaLibraryFunc):
             return 0
         expr = strip_nonvb_chars(str(params[0]))
 
-        # We are executing a string, so any "" in the string are really '"' when
-        # we execute the string.
-        expr = expr.replace('""', '"')
+        # Save original expression.
+        orig_expr = expr
         
-        try:
+        # We are executing a string, so any "" in the string are really '"' when
+        # we execute the string. Maybe?
+        expr = expr.replace('""', '"')
 
-            # Parse it. Assume this is an expression.
+        # Parse it. Assume this is an expression.
+        r = None
+        try:    
             obj = expressions.expression.parseString(expr, parseAll=True)[0]
             
             # Evaluate the expression in the current context.
             # TODO: Does this actually get evalled in the current context?
             r = obj
-            if (isinstance(obj, VBA_Object)):
-                r = obj.eval(context)
-            return r
 
         except ParseException:
-            log.error("Parse error. Cannot evaluate '" + expr + "'")
-            return "NULL"
 
+            # Maybe replacing the '""' with '"' was a bad idea. Try the original
+            # command.
+            try:
+                log.warning("Parsing failed on modified expression. Trying original expression ...")
+                obj = expressions.expression.parseString(orig_expr, parseAll=True)[0]
+                r = obj
+            except ParseException:
+                log.error("Parse error. Cannot evaluate '" + orig_expr + "'")
+                return "NULL"
+
+        # Do any final evaulation needed.
+        if (isinstance(r, VBA_Object)):
+            r = r.eval(context)
+        return r
+            
 class Exists(VbaLibraryFunc):
     """
     Document or Scripting.Dictionary Exists() method.
@@ -1289,9 +1341,11 @@ class Execute(VbaLibraryFunc):
         # Fix invalid string assignments.
         command = strip_lines.fix_vba_code(command)
 
+        # Save original command string.
+        orig_command = command
+        
         # We are executing a string, so any "" in the string are really '"' when
         # we execute the string.
-        orig_command = command
         command = command.replace('""', '"')
 
         # Have we already parsed this?
@@ -1347,7 +1401,7 @@ class Execute(VbaLibraryFunc):
                     obj = modules.module.parseString(short_command, parseAll=True)[0]
                 except ParseException:
                     pass
-                
+
             # Cannot ever parse this. Punt.
             if (obj == None):
                 if (len(orig_command) > 50):
@@ -2591,7 +2645,7 @@ class CLng(VbaLibraryFunc):
                     tmp = int(tmp, 16)
                 elif (len(tmp) == 1):
                     tmp = ord(tmp)
-            r = int(tmp)
+            r = round(tmp)
             if ((r > 2147483647) or (r < -2147483647)):
                 # Overflow. Assume On Error Resume Next.
                 r = "NULL"
@@ -2777,7 +2831,8 @@ class Dir(VbaLibraryFunc):
 
         # Handle a special case for a maldoc that looks for things
         # not existing in a certain directory.
-        if ("\\Microsoft\\Corporation\\" in pat):
+        if (("\\Microsoft\\Corporation\\" in pat) or
+            ("\\AppData\\Roaming\\Microsoft" in pat)):
             return ""
             
         # Just act like we found something always.
@@ -3164,6 +3219,38 @@ class Rnd(VbaLibraryFunc):
 
     def num_args(self):
         return 0
+
+class OnTime(VbaLibraryFunc):
+    """
+    Stubbed emulation of Application.OnTime(). Just immediately calls
+    the callback function.
+    """
+
+    def eval(self, context, params=None):
+
+        # Sanity check.
+        if ((params is None) or (len(params) < 2)):
+            return "NULL"
+
+        # The name of the callback function should be the 2nd argument.
+        callback_name = str(params[1])
+
+        # Is this function defined?
+        callback = None
+        try:
+            callback = context.get(callback_name)
+        except KeyError:
+            log.warning("OnTime() callback function '" + callback_name + "' not found.")
+            return "NULL"
+        import procedures
+        if (not isinstance(callback, procedures.Function) and
+            not isinstance(callback, procedures.Sub)):
+            log.warning("OnTime() callback function '" + callback_name + "' found, but not a function.")
+            return "NULL"
+
+        # Emulate the callback function.
+        log.info("Running OnTime() callback function '" + callback_name + "'.")
+        return eval_arg(callback, context=context)
     
 class Environ(VbaLibraryFunc):
     """
@@ -3218,7 +3305,13 @@ class Environ(VbaLibraryFunc):
         env_vars["VSSDK140Install".lower()] = 'C:\\Program Files (x86)\\Microsoft Visual Studio 14.0\\VSSDK\\'
         env_vars["windir".lower()] = 'C:\\WINDOWS'
 
-        var_name = str(params[0]).strip('%')
+        # Get the environment variable name.
+        var_name = None
+        try:
+            var_name = str(params[0]).strip('%')
+        except UnicodeEncodeError:
+            var_name = filter(isprint, params[0]).strip('%')
+
         # Is this an environment variable we know?
         if context.expand_env_vars and var_name.lower() in env_vars:
             r = env_vars[var_name.lower()]
@@ -4076,6 +4169,74 @@ class UsedRange(VbaLibraryFunc):
     Excel UsedRange() function.
     """
 
+    def _pull_cells_sheet_xlrd(self, sheet):
+        """
+        Pull all the cells from a xlrd Sheet object.
+        """
+
+        # Find the max row and column for the cells.
+        if (not hasattr(sheet, "nrows") or
+            not hasattr(sheet, "ncols")):
+            log.warning("Cannot read all cells from xlrd sheet. Sheet object has no 'nrows' or 'ncols' attribute.")
+            return None
+        max_row = sheet.nrows
+        max_col = sheet.ncols
+
+        # Cycle through all the cells in order.
+        curr_cells = []
+        for curr_row in range(0, max_row + 1):
+            for curr_col in range(0, max_col + 1):
+                try:
+                    curr_cell_xlrd = sheet.cell(curr_row, curr_col)
+                    curr_cell = { "value" : curr_cell_xlrd.value,
+                                  "row" : curr_row + 1,
+                                  "col" : curr_col + 1 }
+                    curr_cells.append(curr_cell)
+                except:
+                    pass
+
+        # Return the cells.
+        return curr_cells
+            
+    def _pull_cells_sheet_internal(self, sheet):
+        """
+        Pull all the cells from a Sheet object defined internally in excel.py.
+        """
+
+        # We are going to use the internal cells field to build the list of all
+        # cells, so this will only work with the ExcelSheet class defined in excel.py.
+        if (not hasattr(sheet, "cells")):
+            log.warning("Cannot read all cells from internal sheet. Sheet object has no 'cells' attribute.")
+            return None
+        
+        # Cycle row by row through the sheet, tracking all the cells.
+
+        # Find the max row and column for the cells.
+        max_row = -1
+        max_col = -1
+        for cell_index in sheet.cells.keys():
+            curr_row = cell_index[0]
+            curr_col = cell_index[1]
+            if (curr_row > max_row):
+                max_row = curr_row
+            if (curr_col > max_col):
+                max_col = curr_col
+
+        # Cycle through all the cells in order.
+        curr_cells = []
+        for curr_row in range(0, max_row + 1):
+            for curr_col in range(0, max_col + 1):
+                try:
+                    curr_cell = { "value" : sheet.cell(curr_row, curr_col),
+                                  "row" : curr_row + 1,
+                                  "col" : curr_col + 1 }
+                    curr_cells.append(curr_cell)
+                except KeyError:
+                    pass
+
+        # Return the cells.
+        return curr_cells
+        
     def eval(self, context, params=None):
 
         # Try each sheet and return the cells from the sheet with the most cells.
@@ -4092,39 +4253,19 @@ class UsedRange(VbaLibraryFunc):
                 log.warning("Cannot process UsedRange() call. No sheets in file.")
                 return "NULL"
 
-            # We are going to use the internal cells field to build the list of all
-            # cells, so this will only work with the ExcelSheet class defined in excel.py.
-            if (not hasattr(sheet, "cells")):
-                log.warning("Cannot process UsedRange() call. Sheet object has no 'cells' attribute.")
-                return "NULL"
-        
-            # Cycle row by row through the sheet, tracking all the cells.
-
-            # Find the max row and column for the cells.
-            max_row = -1
-            max_col = -1
-            for cell_index in sheet.cells.keys():
-                curr_row = cell_index[0]
-                curr_col = cell_index[1]
-                if (curr_row > max_row):
-                    max_row = curr_row
-                if (curr_col > max_col):
-                    max_col = curr_col
-
-            # Cycle through all the cells in order.
-            curr_cells = []
-            for curr_row in range(0, max_row + 1):
-                for curr_col in range(0, max_col + 1):
-                    try:
-                        curr_cells.append(sheet.cell(curr_row, curr_col))
-                    except KeyError:
-                        pass
-
+            # Read all the cells.
+            curr_cells = self._pull_cells_sheet_internal(sheet)
+            if (curr_cells is None):
+                curr_cells = self._pull_cells_sheet_xlrd(sheet)
+                if (curr_cells is None):
+                    curr_cells = []
+                    
             # Does this sheet have the most cells?
             if (len(curr_cells) > len(cells)):
                 cells = curr_cells
                     
-        # Return all of the defined cells.
+        # Return all of the defined cells. Each cell is represented as a dict
+        # with keys 'value', 'row', and 'col'.
         return cells
 
     def num_args(self):
@@ -4324,10 +4465,12 @@ class SpecialCells(VbaLibraryFunc):
         # Currently only handling cell type xlCellTypeConstants.
         r = []
         for cell in cells:
-            cell = str(cell)
-            if (len(cell) == 0):
+            cell_value = str(cell)
+            if (isinstance(cell, dict)):
+                cell_value = str(cell["value"])
+            if (len(cell_value) == 0):
                 continue
-            if (not cell.startswith("=")):
+            if (not cell_value.startswith("=")):
                 r.append(cell)
 
         # Done.
@@ -4862,7 +5005,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2,
                Chr, CopyFile, GetFile, Paragraphs, UsedRange, CountA, SpecialCells,
                RandBetween, Items, Count, GetParentFolderName, WriteByte, ChrB, ChrW,
-               RtlMoveMemory):
+               RtlMoveMemory, OnTime):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 
