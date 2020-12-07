@@ -352,7 +352,8 @@ def _get_embedded_object_values(fname):
                 r.append(i)
         
     except Exception as e:
-        log.error("Cannot read tag/caption from embedded objects. " + str(e))
+        if ("not an OLE2 structured storage file" not in str(e)):
+            log.error("Cannot read tag/caption from embedded objects. " + str(e))
 
     return r
 
@@ -565,7 +566,8 @@ def _read_custom_doc_props(fname):
         return r
             
     except Exception as e:
-        log.error("Cannot read custom doc properties. " + str(e))
+        if ("not an OLE2 structured storage file" not in str(e)):
+            log.error("Cannot read custom doc properties. " + str(e))
         return []
     
 def get_vb_contents(vba_code):
@@ -1717,13 +1719,13 @@ def _process_file (filename,
                 except Exception as exc:
                     log.error("Failed to output results to output file. " + str(exc))
 
-            return (vm.actions, vm.external_funcs, tmp_iocs)
+            return (vm.actions, vm.external_funcs, tmp_iocs, shellcode_bytes)
 
         else:
             safe_print('Finished analyzing ' + str(orig_filename) + " .\n")
             safe_print('No VBA macros found.')
             safe_print('')
-            return ([], [], [])
+            return ([], [], [], [])
     except Exception as e:
         if (("SystemExit" not in str(e)) and (". Aborting analysis." not in str(e))):
             traceback.print_exc()

@@ -91,10 +91,10 @@ def member_access(var, field):
     # Reading a field from a dict?
     field = str(field)
     if (isinstance(var, dict)):
-        if (field in var):
-            return var[field]
-        elif (field.lower() in var):
+        if (field.lower() in var):
             return var[field.lower()]
+        elif ((field.lower() == "text") and ("value" in var)):
+            return var["value"]
         else:
             return "NULL"
 
@@ -105,7 +105,7 @@ def member_access(var, field):
     elif (field in globals()):
         return globals[field]
     else:
-        return "NULL"
+        return val
 
 # This function is here to ensure that we return the same global
 # shellcode variable as what is updated by emulated VBA functions
@@ -3514,7 +3514,7 @@ class Close(VbaLibraryFunc):
             # being tracked. We will only handle the Close() if there is only 1
             # current open file.
             if not context.open_files:
-                log.error("Cannot process Close(). No open files.")
+                log.warning("Cannot process Close(). No open files.")
                 return
 
             if len(context.open_files) > 1:
@@ -3854,7 +3854,7 @@ class Run(VbaLibraryFunc):
             s = context.get(func_name)
             return s.eval(context=context, params=call_params)
         except KeyError:
-            log.error("Application.Run() failed. Cannot find function " + str(func_name) + ".")
+            log.warning("Application.Run() failed. Cannot find function " + str(func_name) + ".")
             return 0
 
 class Exec(VbaLibraryFunc):
@@ -4744,7 +4744,7 @@ class CreateTextFile(VbaLibraryFunc):
             fname = context.get(params[0])
         except KeyError:
             fname = str(params[0])
-
+            
         # Do we have a numeric file ID?
         file_id = ""
         if (len(params) > 1):
@@ -4752,6 +4752,17 @@ class CreateTextFile(VbaLibraryFunc):
             
         # Save that the file is opened.
         context.open_file(fname, file_id)
+        context.report_action('File Access', fname, "")
+
+        # This could be an external WebDAV access.
+        if (fname.startswith("\\\\")):
+
+            # Pull out the mapped drive ID.
+            if ("\\" in fname[2:]):
+                end = fname[2:].index("\\") + 2
+                drive_id = fname[2:end].strip()
+                if (re.search(r"[\w_]{1,100}\.\w{2,10}", drive_id) is not None):
+                    context.save_intermediate_iocs("http://" + drive_id)
 
         # How about returning the name of the opened file.
         return fname
