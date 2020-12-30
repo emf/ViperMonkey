@@ -268,7 +268,12 @@ class Parameter(VBA_Object):
         return r
 
     def to_python(self, context, params=None, indent=0):
-        return str(self.name)
+        name_str = str(self.name)
+        init_str = ""
+        if ((self.init_val is not None) and (len(str(self.init_val)) > 0)):
+            init_str = "=" + to_python(self.init_val, context=context)
+        r = name_str + init_str
+        return r
     
 # 5.3.1.5 Parameter Lists
 #
@@ -1167,6 +1172,8 @@ class Let_Statement(VBA_Object):
             elif (((context.get_type(self.name) == "Integer") or
                    (context.get_type(self.name) == "Long")) and
                   (isinstance(value, str))):
+                print "SET INT"
+                print self.name
                 try:
                     if (value == "NULL"):
                         value = 0
@@ -3811,9 +3818,54 @@ class Call_Statement(VBA_Object):
         
         # Done.
         return r
-    
+
+    def _handle_as_member_access(self, context):
+        """
+        Certain object method calls need to be handled as member access
+        expressions. Given parsing limitations some of these are parsed
+        as regular calls, so convert those to member access expressions
+        here
+        """
+
+        # Is this a method call?
+        func_name = str(self.name).strip()
+        if (("." not in func_name) or (func_name.startswith("."))):
+            return None
+        short_func_name = func_name[func_name.rindex(".") + 1:]
+        
+        # It's a method call. Is it one we are handling as a member
+        # access expression?
+        memb_funcs = set(["AddItem"])
+        if (short_func_name not in memb_funcs):
+            return None
+
+        # It should be handled as a member access expression.
+        # Convert it.
+        func_call_str = func_name + "("
+        first = True
+        for p in self.params:
+            if (not first):
+                func_call_str += ", "
+            first = False
+            func_call_str += str(p)
+        func_call_str += ")"
+        try:
+            memb_exp = member_access_expression.parseString(func_call_str, parseAll=True)[0]
+
+            # Evaluate the call as a member access expression.
+            return memb_exp.eval(context)
+        except ParseException as e:
+
+            # Can't eval as a member access expression.
+            return None
+        
     def _handle_with_calls(self, context):
 
+        # Can we handle this call as a member access expression?
+        as_member_access = self._handle_as_member_access(context)
+        if (as_member_access is not None):
+            return as_member_access
+        
         # Is this a call like '.WriteText "foo"'?
         func_name = str(self.name).strip()
         if (not func_name.startswith(".")):
@@ -3830,7 +3882,7 @@ class Call_Statement(VBA_Object):
         call_obj = Function_Call(None, None, None, old_call=self)
         call_obj.name = func_name[1:] # Get rid of initial '.'
         full_expr = MemberAccessExpression(None, None, None, raw_fields=(context.with_prefix, [call_obj], []))
-        
+
         # Evaluate the fully qualified object method call.
         r = eval_arg(full_expr, context)
         return r

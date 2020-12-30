@@ -114,8 +114,11 @@ import prettytable
 from oletools.thirdparty.xglob import xglob
 from oletools.olevba import VBA_Parser, filter_vba, FileOpenError
 import olefile
-import xlrd
-
+try:
+    import xlrd2 as xlrd
+except:
+    import xlrd
+    
 from core.meta import get_metadata_exif
 
 # add the vipermonkey folder to sys.path (absolute+normalized path):
@@ -1006,6 +1009,13 @@ def load_excel_libreoffice(data):
     return result_book
         
 def load_excel_xlrd(data):
+
+    # Only use this on Office 97 Excel files.
+    if (not filetype.is_office97_file(data, True)):
+        log.warning("File is not an Excel 97 file. Not reading with xlrd2.")
+        return None
+
+    # It is Office 97. See if we can read it with xlrd2.
     try:
         if (log.getEffectiveLevel() == logging.DEBUG):
             log.debug("Trying to load with xlrd...")
@@ -1025,20 +1035,20 @@ def load_excel(data):
 
     return - An xlrd (like) object with the Excel file contents.
     """
-
-    # First try loading the sheets with LibreOffice.
-    wb = load_excel_libreoffice(data)
-    if (wb is not None):
-        return wb
     
-    # That failed. Fall back to loading the sheet with xlrd.
+    # Load the sheet with xlrd2.
     wb = load_excel_xlrd(data)
     if (wb is not None):
 
-        # Did we load sheets with xlrd?
+        # Did we load sheets with xlrd2?
         if (len(wb.sheet_names()) > 0):
             return wb
 
+    # Next try loading the sheets with LibreOffice.
+    wb = load_excel_libreoffice(data)
+    if (wb is not None):
+        return wb
+        
     # Nothing worked.
     return None
         
@@ -1220,9 +1230,14 @@ def _process_file (filename,
             comp_modules = parse_streams(vba, strip_useless)
             if (comp_modules is None):
                 return None
+            got_code = False
             for m in comp_modules:
                 if (m != "empty"):
                     vm.add_compiled_module(m)
+                    got_code = True
+            if not got_code:
+                log.info("No VBA or VBScript found. Exiting.")
+                return ([], [], [], [])
 
             # Pull out document variables.
             log.info("Reading document variables...")
@@ -1321,6 +1336,7 @@ def _process_file (filename,
                                      "ActiveDocument." + var_name,
                                      var_name + ".Tag",
                                      var_name + ".Text",
+                                     var_name + ".AlternativeText",
                                      var_name + ".Title",
                                      var_name + ".Value",
                                      var_name + ".Caption",
@@ -1328,6 +1344,7 @@ def _process_file (filename,
                                      "me." + var_name,
                                      "me." + var_name + ".Tag",
                                      "me." + var_name + ".Text",
+                                     "me." + var_name + ".AlternativeText",
                                      "me." + var_name + ".Title",
                                      "me." + var_name + ".Value",
                                      "me." + var_name + ".Caption",
@@ -1700,9 +1717,9 @@ def _process_file (filename,
                 actions_data = []
                 for action in vm.actions:
                     actions_data.append({
-                        "action": action[0],
-                        "parameters": action[1],
-                        "description": action[2]
+                        "action": str(action[0]),
+                        "parameters": str(action[1]),
+                        "description": str(action[2])
                     })
 
                 out_data = {
@@ -1934,7 +1951,10 @@ def main():
             # add json results to list
             if (options.out_file):
                 with open(options.out_file, 'r') as json_file:
-                    json_results.append(json.loads(json_file.read()))
+                    try:
+                        json_results.append(json.loads(json_file.read()))
+                    except ValueError:
+                        pass
 
     if (options.out_file):
         with open(options.out_file, 'w') as json_file:

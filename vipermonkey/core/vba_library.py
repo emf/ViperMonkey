@@ -74,14 +74,14 @@ import expressions
 import modules
 import strip_lines
 from vba_object import _eval_python
+import utils
+from excel import *
 
 from logger import log
 
 # === VBA LIBRARY ============================================================
 
 # TODO: Word 2013 object model reference: https://msdn.microsoft.com/EN-US/library/office/ff837519.aspx
-# TODO: Excel
-# TODO: other MS Office apps?
 
 def member_access(var, field):
     """
@@ -105,7 +105,7 @@ def member_access(var, field):
     elif (field in globals()):
         return globals[field]
     else:
-        return val
+        return var
 
 # This function is here to ensure that we return the same global
 # shellcode variable as what is updated by emulated VBA functions
@@ -293,10 +293,21 @@ class IsEmpty(VbaLibraryFunc):
         if ((params is None) or (len(params) == 0)):
             return True
         item = params[0]
+
+        # Handle flat out empty values.
         if ((item is None) or (item == "NULL")):
             return True
+
+        # Handle Excel cells.
+        if (isinstance(item, dict) and ("value" in item)):
+            return self.eval(context, [item["value"]])
+        if (item == "empty:u''"):
+            return True
+        
+        # Handle list type data structures.
         if ((hasattr(item, '__len__')) and (len(item) == 0)):
             return True
+        print item
         return False
 
     def num_args(self):
@@ -707,6 +718,10 @@ class Len(VbaLibraryFunc):
             # Is this a string?            
             if (isinstance(val, str)):
 
+                # If this is VBScript strings are sensible and we can just return the length.
+                if (context.is_vbscript):
+                    return len(val)
+
                 # Convert the string to a VbStr to handle mized ASCII/wide char weirdness.
                 vb_val = vb_str.VbStr(val, context.is_vbscript)
                 return vb_val.len()
@@ -767,6 +782,8 @@ class TypeName(VbaLibraryFunc):
         if (isinstance(val, bool)):
             return "Boolean"
         if (isinstance(val, str)):
+            if (val.lower() == "adodb.stream"):
+                return "ADODB.Stream"
             return "String"
         if (isinstance(val, int)):
             return "Integer"
@@ -920,7 +937,6 @@ class Left(VbaLibraryFunc):
         if s == None: return None
 
         # Arg should be a string.
-        s = None
         try:
             s = str(s)
         except UnicodeDecodeError:
@@ -1464,6 +1480,24 @@ class IsObject(VbaLibraryFunc):
         # Say everything is an object.
         return True
 
+class AddItem(VbaLibraryFunc):
+    """
+    ListBox AddItem() VB object method.
+    """
+
+    def eval(self, context, params=None):
+
+        # Sanity check.
+        if ((params is None) or (len(params) < 2)):
+            return None
+        the_list = params[0]
+        value = params[1]
+        if (not isinstance(the_list, list)):
+            return None
+        r = list(the_list)
+        r.append(value)
+        return r
+    
 class Add(VbaLibraryFunc):
     """
     Add() VB object method. Currently only adds to Scripting.Dictionary objects is supported.
@@ -1904,17 +1938,13 @@ class TransformFinalBlock(VbaLibraryFunc):
             base64_str += chr(b)
 
         # Decode the base64 encoded string.
-        r = "NULL"
-        try:
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("TransformFinalBlock(): Try base64 decode of '" + base64_str + "'...")
+        r = utils.b64_decode(base64_str)
+        if (r is None):
             if (log.getEffectiveLevel() == logging.DEBUG):
-                log.debug("eval_arg: Try base64 decode of '" + base64_str + "'...")
-            base64_str = filter(isprint, str(base64_str).strip())
-            r = base64.b64decode(base64_str).replace(chr(0), "")
-            if (log.getEffectiveLevel() == logging.DEBUG):
-                log.debug("eval_arg: Base64 decode success.")
-        except Exception as e:
-            if (log.getEffectiveLevel() == logging.DEBUG):
-                log.debug("eval_arg: Base64 decode fail. " + str(e))
+                log.debug("TransformFinalBlock(): Base64 decode fail.")
+            r = "NULL"
 
         # Return the decoded string.
         if (log.getEffectiveLevel() == logging.DEBUG):
@@ -2261,15 +2291,14 @@ class LoadXML(VbaLibraryFunc):
             xml = xml[start:end].strip()
 
             # It looks like maybe this magically does base64 decode? Try that.
-            try:
+            if (log.getEffectiveLevel() == logging.DEBUG):
+                log.debug("LoadXML(): Try base64 decode of '" + xml + "'...")
+            decoded = utils.b64_decode(xml)
+            if (decoded is not None):
+                xml = decoded.replace(chr(0), "")
+            else:
                 if (log.getEffectiveLevel() == logging.DEBUG):
-                    log.debug("eval_arg: Try base64 decode of '" + xml + "'...")
-                xml = base64.b64decode(xml).replace(chr(0), "")
-                if (log.getEffectiveLevel() == logging.DEBUG):
-                    log.debug("eval_arg: Base64 decode success.")
-            except Exception as e:
-                if (log.getEffectiveLevel() == logging.DEBUG):
-                    log.debug("eval_arg: Base64 decode fail. " + str(e))
+                    log.debug("LoadXML(): Base64 decode fail.")
 
         # Return the XML or base64 string.
         return xml
@@ -2982,7 +3011,9 @@ class Base64Decode(VbaLibraryFunc):
         txt = params[0]
         if (txt is None):
             txt = ''
-        r = base64.b64decode(txt)
+        r = utils.b64_decode(txt)
+        if (r is None):
+            r = "NULL"
         if (log.getEffectiveLevel() == logging.DEBUG):
             log.debug("Base64Decode: %r returns %r" % (self, r))
         return r
@@ -3979,7 +4010,14 @@ class ReadText(VbaLibraryFunc):
     """
 
     def eval(self, context, params=None):
-        
+
+        # Doing base64 conversion with a VBA object?
+        with_str = str(context.with_prefix).strip()
+        if (with_str.endswith("GetDecodedContentStream")):
+            var_name = with_str.replace("GetDecodedContentStream", "GetEncodedContentStream") + ".ReadText"
+            if (context.contains(var_name)):
+                return context.get(var_name)
+            
         # TODO: Currently the stream object on which ReadText() is
         # being called is not being tracked. We will only handle the
         # ReadText() if there is only 1 current open file.
@@ -4079,6 +4117,94 @@ class GetTickCount(VbaLibraryFunc):
         ticks += random.randint(100, 10000)
         return ticks
 
+class Rows(VbaLibraryFunc):
+    """
+    This emulates geting the Rows field of an Excel sheet.
+    Currently stubbed out to just return a list of dicts with row numbers.
+    """
+
+    def eval(self, context, params=None):
+
+        # Do we have a loaded Excel file?
+        if (context.loaded_excel is None):
+            context.increase_general_errors()
+            log.warning("Cannot emulate Rows field access. No Excel file loaded.")
+            return []
+
+        # Get the sheet name if given.
+        sheet_name = "__NO SHEET NAME__"
+        if ((params is not None) and (len(params) > 0)):
+            sheet_name = str(params[0]).strip()
+
+        # Get the sheet from which to pull rows.
+        sheet = None
+        if (sheet_name in context.loaded_excel.sheet_names()):
+            sheet = context.loaded_excel.sheet_by_name(sheet_name)
+
+        # No sheet name. Just find the sheet with the most rows.
+        else:
+
+            # Look through all sheets.
+            max_rows = -1
+            for sheet_index in range(0, len(context.loaded_excel.sheet_names())):
+            
+                # Load the current sheet.
+                curr_sheet = None
+                try:
+                    curr_sheet = context.loaded_excel.sheet_by_index(sheet_index)
+                except:
+                    context.increase_general_errors()
+                    log.warning("Cannot process Cells() call. No sheets in file.")
+                    return "NULL"
+
+                # Does this have the most rows?
+                curr_rows = get_num_rows(curr_sheet)
+                if (curr_rows > max_rows):
+                    max_rows = curr_rows
+                    sheet = curr_sheet
+
+        # Return a list of dicts with row info.
+        r = []
+        num_rows = get_num_rows(sheet)
+        for i in range(0, num_rows + 1):
+            r.append({ "Row" : i })
+
+        # Return the row info.
+        return r
+
+    def num_args(self):
+        return 0
+
+def _read_cell(sheet, row, col):
+
+    # Read and process the cell.
+    try:
+        raw_cell = sheet.cell(row, col)
+        r = str(raw_cell).replace("text:", "")
+        if (r.startswith("'") and r.endswith("'")):
+            r = r[1:-1]
+        if (r.startswith('u')):
+            r = r[1:]
+        if (r.startswith("'") and r.endswith("'") and (len(r) >= 2)):
+            r = r[1:-1]
+        if (r.startswith('"') and r.endswith('"') and (len(r) >= 2)):
+            r = r[1:-1]
+        if (r == "empty:u''"):
+            r = ""
+        if (r.startswith("number:")):
+            r = r[len("number:"):]
+        if (log.getEffectiveLevel() == logging.DEBUG):
+            log.debug("Excel Read: Cell(" + str(col) + ", " + str(row) + ") = '" + str(r) + "'")
+        r = { "value" : r,
+              "row" : row + 1,
+              "col" : col + 1 }
+        return r
+
+    except Exception as e:
+        
+        # Failed to read cell.
+        return None
+    
 class Cells(VbaLibraryFunc):
     """
     Excel Cells() function.
@@ -4122,9 +4248,18 @@ class Cells(VbaLibraryFunc):
             context.increase_general_errors()
             log.warning("Cannot process Cells() call. Row " + str(params[0]) + " invalid.")
             return "NULL"
-        
-        # Try each sheet until we read a cell.
+
+        # First try the sheet with the most cells.
         # TODO: Figure out the actual sheet to load.
+        sheet = get_largest_sheet(context.loaded_excel)
+        if (sheet is None):
+            return "NULL"
+        # Return the cell contents.
+        cell_val = _read_cell(sheet, row, col)
+        if (cell_val is not None):
+            return cell_val
+        
+        # The largest sheet did not work. Try each sheet until we read a cell.
         for sheet_index in range(0, len(context.loaded_excel.sheet_names())):
             
             # Load the current sheet.
@@ -4137,27 +4272,10 @@ class Cells(VbaLibraryFunc):
                 return "NULL"
 
             # Return the cell contents.
-            try:
-                raw_cell = sheet.cell(row, col)
-                r = str(raw_cell).replace("text:", "")
-                if (r.startswith("'") and r.endswith("'")):
-                    r = r[1:-1]
-                if (r.startswith('u')):
-                    r = r[1:]
-                if (log.getEffectiveLevel() == logging.DEBUG):
-                    log.debug("Excel Read: Cell(" + str(col) + ", " + str(row) + ") = '" + str(r) + "'")
-                if (r.startswith("'") and r.endswith("'") and (len(r) >= 2)):
-                    r = r[1:-1]
-                if (r.startswith('"') and r.endswith('"') and (len(r) >= 2)):
-                    r = r[1:-1]
-                #print "CELL!!"
-                #print r
-                return r
-
-            except Exception as e:
-        
-                # Failed to read cell.
-                continue
+            cell_val = _read_cell(sheet, row, col)
+            if (cell_val is not None):
+                return cell_val
+            continue
 
         # Can't read the cell.
         context.increase_general_errors()
@@ -4168,105 +4286,18 @@ class UsedRange(VbaLibraryFunc):
     """
     Excel UsedRange() function.
     """
-
-    def _pull_cells_sheet_xlrd(self, sheet):
-        """
-        Pull all the cells from a xlrd Sheet object.
-        """
-
-        # Find the max row and column for the cells.
-        if (not hasattr(sheet, "nrows") or
-            not hasattr(sheet, "ncols")):
-            log.warning("Cannot read all cells from xlrd sheet. Sheet object has no 'nrows' or 'ncols' attribute.")
-            return None
-        max_row = sheet.nrows
-        max_col = sheet.ncols
-
-        # Cycle through all the cells in order.
-        curr_cells = []
-        for curr_row in range(0, max_row + 1):
-            for curr_col in range(0, max_col + 1):
-                try:
-                    curr_cell_xlrd = sheet.cell(curr_row, curr_col)
-                    curr_cell = { "value" : curr_cell_xlrd.value,
-                                  "row" : curr_row + 1,
-                                  "col" : curr_col + 1 }
-                    curr_cells.append(curr_cell)
-                except:
-                    pass
-
-        # Return the cells.
-        return curr_cells
-            
-    def _pull_cells_sheet_internal(self, sheet):
-        """
-        Pull all the cells from a Sheet object defined internally in excel.py.
-        """
-
-        # We are going to use the internal cells field to build the list of all
-        # cells, so this will only work with the ExcelSheet class defined in excel.py.
-        if (not hasattr(sheet, "cells")):
-            log.warning("Cannot read all cells from internal sheet. Sheet object has no 'cells' attribute.")
-            return None
-        
-        # Cycle row by row through the sheet, tracking all the cells.
-
-        # Find the max row and column for the cells.
-        max_row = -1
-        max_col = -1
-        for cell_index in sheet.cells.keys():
-            curr_row = cell_index[0]
-            curr_col = cell_index[1]
-            if (curr_row > max_row):
-                max_row = curr_row
-            if (curr_col > max_col):
-                max_col = curr_col
-
-        # Cycle through all the cells in order.
-        curr_cells = []
-        for curr_row in range(0, max_row + 1):
-            for curr_col in range(0, max_col + 1):
-                try:
-                    curr_cell = { "value" : sheet.cell(curr_row, curr_col),
-                                  "row" : curr_row + 1,
-                                  "col" : curr_col + 1 }
-                    curr_cells.append(curr_cell)
-                except KeyError:
-                    pass
-
-        # Return the cells.
-        return curr_cells
         
     def eval(self, context, params=None):
 
         # Try each sheet and return the cells from the sheet with the most cells.
         # TODO: Figure out the actual sheet to load.
-        cells = []
-        for sheet_index in range(0, len(context.loaded_excel.sheet_names())):
-        
-            # Try the current sheet.
-            sheet = None
-            try:
-                sheet = context.loaded_excel.sheet_by_index(sheet_index)
-            except:
-                context.increase_general_errors()
-                log.warning("Cannot process UsedRange() call. No sheets in file.")
-                return "NULL"
+        sheet = get_largest_sheet(context.loaded_excel)
+        if (sheet is None):
+            return []
 
-            # Read all the cells.
-            curr_cells = self._pull_cells_sheet_internal(sheet)
-            if (curr_cells is None):
-                curr_cells = self._pull_cells_sheet_xlrd(sheet)
-                if (curr_cells is None):
-                    curr_cells = []
-                    
-            # Does this sheet have the most cells?
-            if (len(curr_cells) > len(cells)):
-                cells = curr_cells
-                    
         # Return all of the defined cells. Each cell is represented as a dict
         # with keys 'value', 'row', and 'col'.
-        return cells
+        return pull_cells_sheet(sheet)
 
     def num_args(self):
         return 0
@@ -4382,44 +4413,53 @@ class Range(VbaLibraryFunc):
             log.warning("Only 1 argument Range() calls supported. Returning NULL.")
             return "NULL"
             
-        # Guess that we want the 1st sheet.
-        sheet = None
-        try:
-            sheet = context.loaded_excel.sheet_by_index(0)
-        except:
-            context.increase_general_errors()
-            log.warning("Cannot process Range() call. No sheets in file.")
-            return "NULL"
-
-        # Multiple cells?
-        range_index = str(params[0])
-        if (":" in range_index):
+        # Try each sheet until we read a cell.
+        r = None
+        col = None
+        for sheet_index in range(0, len(context.loaded_excel.sheet_names())):
+            sheet = None
             try:
-                return self._read_cell_list(sheet, range_index)
-            except Exception as e:
+                sheet = context.loaded_excel.sheet_by_index(sheet_index)
+            except:
                 context.increase_general_errors()
+                log.warning("Cannot process Range() call. No sheets in file.")
                 return "NULL"
-        
-        # Get the cell contents.
-        try:
 
-            # Pull out the cell value.
-            row, col = self._get_row_and_column(params[0])
-            val = str(sheet.cell_value(row, col))
+            # Multiple cells?
+            range_index = str(params[0])
+            if (":" in range_index):
+                try:
+                    return self._read_cell_list(sheet, range_index)
+                except Exception as e:
+                    # Try the next sheet.
+                    continue
+        
+            # Get the cell contents.
+            try:
+
+                # Pull out the cell value.
+                row, col = self._get_row_and_column(params[0])
+                val = str(sheet.cell_value(row, col))
             
-            # Return the cell value.
-            log.info("Read cell (" + range_index + ") from sheet 1 = " + str(val))
-            if (log.getEffectiveLevel() == logging.DEBUG):
-                log.debug("Cell value = '" + val + "'")
-            return val            
+                # Return the cell value.
+                log.info("Read cell (" + range_index + ") from sheet " + str(sheet_index) + " = " + str(val))
+                return val            
 
-        except Exception as e:
+            except Exception as e:
+                # Try the next sheet.
+                continue
+
+        # We did not get the cell.
+        row = "??"
+        col = "??"
+        try:
+            row, col = self._get_row_and_column(params[0])
+        except:
+            pass
+        log.warning("Failed to read cell (" + str(row) + ", " + str(col) + ") [" + str(params[0]) + "]")
+        context.increase_general_errors()
+        return "NULL"
         
-            # Failed to read cell.
-            context.increase_general_errors()
-            log.warning("Failed to read Range(" + str(params[0]) + "). " + str(e))
-            return "NULL"
-
 class CountA(VbaLibraryFunc):
     """
     Excel CountA() function.
@@ -4492,6 +4532,14 @@ class RandBetween(VbaLibraryFunc):
 
     def num_args(self):
         return 2
+
+class DatePart(VbaLibraryFunc):
+    """
+    DatePart() function. Currently (very) stubbed to just return 3.
+    """
+
+    def eval(self, context, params=None):
+        return 3
     
 class Date(VbaLibraryFunc):
     """
@@ -5016,7 +5064,7 @@ for _class in (MsgBox, Shell, Len, Mid, MidB, Left, Right,
                WriteProcessMemory, RunShell, CopyHere, GetFolder, Hour, _Chr, SaveAs2,
                Chr, CopyFile, GetFile, Paragraphs, UsedRange, CountA, SpecialCells,
                RandBetween, Items, Count, GetParentFolderName, WriteByte, ChrB, ChrW,
-               RtlMoveMemory, OnTime):
+               RtlMoveMemory, OnTime, AddItem, Rows, DatePart):
     name = _class.__name__.lower()
     VBA_LIBRARY[name] = _class()
 

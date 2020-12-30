@@ -52,7 +52,6 @@ __version__ = '0.08'
 # --- IMPORTS ------------------------------------------------------------------
 
 import logging
-import base64
 from logger import log
 import re
 from curses_ascii import isprint
@@ -519,6 +518,7 @@ def _infer_type_of_expression(expr, context):
     import operators
     import vba_library
 
+    #print "LOOK FOR TYPE"
     #print expr
     #print type(expr)
 
@@ -593,6 +593,9 @@ def _infer_type(var, code_chunk, context):
     Try to infer the type of an undefined variable based on how it is used ("STRING" or "INTEGER").
 
     This is currently purely a heuristic.
+
+    returns a tuple, 1st element is the inferred type ("STRING" or "INTEGER") and the 2nd element 
+    is a flag indicating if we are sure of the type (True) or just guessing (False).
     """
 
     # Get all the assignments in the code chunk.
@@ -607,17 +610,17 @@ def _infer_type(var, code_chunk, context):
 
         # Try to infer the type somewhat logically.
         poss_type = _infer_type_of_expression(assign.expression, context)
-        if (poss_type is not None):
-            return poss_type
+        if ((poss_type is not None) and (poss_type != "UNKNOWN")):
+            return (poss_type, True)
         
         # Does a VBA function that returns a string appear on the RHS?
         rhs = str(assign.expression).lower()
         for str_func in str_funcs:
             if (str_func in rhs):
-                return "STRING"
+                return ("STRING", True)
 
     # Does not look like a string, assume int.
-    return "INTEGER"
+    return ("INTEGER", False)
 
 def _get_var_vals(item, context, global_only=False):
     """
@@ -728,11 +731,18 @@ def _get_var_vals(item, context, global_only=False):
         if (val is None):
 
             # Variable is not defined. Try to infer the type based on how it is used.
-            var_type = _infer_type(var, item, context)
+            #print "TOP LOOK TYPE: " + str(var)
+            var_type, certain_of_type = _infer_type(var, item, context)
             if (var_type == "INTEGER"):
                 val = 0
+                if certain_of_type:
+                    #print "SET TYPE INT"
+                    #print var
+                    context.set_type(var, "Integer")
             elif (var_type == "STRING"):
                 val = ""
+                if certain_of_type:
+                    context.set_type(var, "String")
             else:
                 log.warning("Type '" + str(var_type) + "' of var '" + str(var) + "' not handled." + \
                             " Defaulting initial value to 0.")
@@ -1033,6 +1043,7 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         tmp_context = Context(context=context, _locals=context.locals, copy_globals=True)
         
         # Get the Python code for the loop.
+        log.info("Generating Python JIT code...")
         code_python = to_python(loop, tmp_context)
         if add_boilerplate:
             var_inits, _ = _loop_vars_to_python(loop, tmp_context, 0)
@@ -1046,6 +1057,7 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         if (log.getEffectiveLevel() == logging.DEBUG):
             safe_print("JIT CODE!!")
             safe_print(code_python)
+        log.info("Done generating Python JIT code.")
 
         # Extended ASCII strings are handled differently in VBScript and VBA.
         # Punt if we are emulating VBA and we have what appears to be extended ASCII
@@ -1082,6 +1094,7 @@ def _eval_python(loop, context, params=None, add_boilerplate=False, namespace=No
         elif (namespace is None):
             # Magic. For some reason exec'ing in locals() makes the dynamically generated
             # code recognize functions defined in the dynamic code. I don't know why.
+            log.info("Evaluating Python JIT code...")
             exec code_python in locals()
         else:
             exec(code_python, namespace)
@@ -1237,20 +1250,12 @@ def eval_arg(arg, context, treat_as_var_name=False):
                     val = context.get(tmp)
     
                     # It looks like maybe this magically does base64 decode? Try that.
-                    try:
-                        if (log.getEffectiveLevel() == logging.DEBUG):
-                            log.debug("eval_arg: Try base64 decode of '" + val + "'...")
-                        base64_str = filter(isprint, str(base64_str).strip())
-                        val_decode = base64.b64decode(str(val)).replace(chr(0), "")
-                        if (log.getEffectiveLevel() == logging.DEBUG):
-                            log.debug("eval_arg: Base64 decode success: '" + val_decode + "'...")
+                    if (log.getEffectiveLevel() == logging.DEBUG):
+                        log.debug("eval_arg: Try base64 decode of '" + str(val) + "'...")
+                    val_decode = utils.b64_decode(val)
+                    if (val_decode is not None):
                         if got_constant_math: set_cached_value(arg, val_decode)
                         return val_decode
-                    except Exception as e:
-                        if (log.getEffectiveLevel() == logging.DEBUG):
-                            log.debug("eval_arg: Base64 decode fail. " + str(e))
-                        if got_constant_math: set_cached_value(arg, val)
-                        return val
                 except KeyError:
                     if (log.getEffectiveLevel() == logging.DEBUG):
                         log.debug("eval_arg: Not found as .text.")
@@ -1586,6 +1591,12 @@ def coerce_to_str(obj, zero_is_null=False):
         if (not bad):
             return r
 
+    # Is this an Excel cell dict?
+    if (isinstance(obj, dict) and ("value" in obj)):
+
+        # Return the value as a string.
+        return (coerce_to_str(obj["value"]))
+        
     # Not a character byte array. Punt.
     try:
         return str(obj)
@@ -1607,6 +1618,7 @@ def coerce_to_int(obj):
     :param obj: VBA object
     :return: int
     """
+
     # in VBA, Null/None is equivalent to 0
     if ((obj is None) or (obj == "NULL")):
         return 0
@@ -1638,6 +1650,12 @@ def coerce_to_int(obj):
         if (re.match(hex_pat, obj.lower()) is not None):
             return int(obj.lower().replace("&h", "0x"), 16)
 
+    # Is this an Excel cell dict?
+    if (isinstance(obj, dict) and ("value" in obj)):
+
+        # Return the value as an int.
+        return (coerce_to_int(obj["value"]))
+        
     # Try regular int.
     return int(obj)
 
@@ -1681,6 +1699,12 @@ def coerce_to_num(obj):
         if (re.match(hex_pat, obj.lower()) is not None):
             return int(obj.lower().replace("&h", "0x"), 16)
 
+    # Is this an Excel cell dict?
+    if (isinstance(obj, dict) and ("value" in obj)):
+
+        # Return the value as a number.
+        return (coerce_to_num(obj["value"]))
+        
     # Try regular int.
     return int(obj)
 

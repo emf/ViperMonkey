@@ -38,6 +38,178 @@ https://github.com/decalage2/ViperMonkey
 
 __version__ = '0.03'
 
+import logging
+from logger import log
+
+def get_largest_sheet(workbook):
+    """
+    Get the sheet in a workbook with the most cells.
+    """
+
+    # Have we already computed this?
+    if (hasattr(workbook, "__largest_sheet__")):
+        return workbook.__largest_sheet__
+    
+    # Look at all the sheets.
+    cells = []
+    big_sheet = None
+    for sheet_index in range(0, len(workbook.sheet_names())):
+        
+        # Try the current sheet.
+        sheet = None
+        try:
+            sheet = workbook.sheet_by_index(sheet_index)
+        except:
+            return None
+
+        # Read all the cells.
+        curr_cells = pull_cells_sheet(sheet)
+        if (curr_cells is None):
+            curr_cells = []
+                    
+        # Does this sheet have the most cells?
+        if (len(curr_cells) > len(cells)):
+            cells = curr_cells
+            big_sheet = sheet
+
+    # Done.
+    workbook.__largest_sheet__ = big_sheet
+    return big_sheet
+
+def get_num_rows(sheet):
+    """
+    Get the number of rows in an Excel sheet.
+    """
+
+    # Internal representation?
+    if (hasattr(sheet, "num_rows")):
+        return sheet.num_rows()
+
+    # xlrd sheet?
+    if (hasattr(sheet, "nrows")):
+        return sheet.nrows
+
+    # Unhandled sheet object.
+    return 0
+
+def get_num_cols(sheet):
+    """
+    Get the number of columns in an Excel sheet.
+    """
+
+    # Internal representation?
+    if (hasattr(sheet, "num_cols")):
+        return sheet.num_cols()
+
+    # xlrd sheet?
+    if (hasattr(sheet, "ncols")):
+        return sheet.ncols
+
+    # Unhandled sheet object.
+    return 0
+
+def _pull_cells_sheet_xlrd(sheet):
+    """
+    Pull all the cells from a xlrd Sheet object.
+    """
+
+    # Find the max row and column for the cells.
+    if (not hasattr(sheet, "nrows") or
+        not hasattr(sheet, "ncols")):
+        log.warning("Cannot read all cells from xlrd sheet. Sheet object has no 'nrows' or 'ncols' attribute.")
+        return None
+    max_row = sheet.nrows
+    max_col = sheet.ncols
+
+    # Cycle through all the cells in order.
+    curr_cells = []
+    for curr_row in range(0, max_row + 1):
+        for curr_col in range(0, max_col + 1):
+            try:
+                curr_cell_xlrd = sheet.cell(curr_row, curr_col)
+                curr_cell = { "value" : curr_cell_xlrd.value,
+                              "row" : curr_row + 1,
+                              "col" : curr_col + 1 }
+                curr_cells.append(curr_cell)
+            except:
+                pass
+
+    # Return the cells.
+    return curr_cells
+            
+def _pull_cells_sheet_internal(sheet):
+    """
+    Pull all the cells from a Sheet object defined internally in excel.py.
+    """
+
+    # We are going to use the internal cells field to build the list of all
+    # cells, so this will only work with the ExcelSheet class defined in excel.py.
+    if (not hasattr(sheet, "cells")):
+        log.warning("Cannot read all cells from internal sheet. Sheet object has no 'cells' attribute.")
+        return None
+        
+    # Cycle row by row through the sheet, tracking all the cells.
+
+    # Find the max row and column for the cells.
+    max_row = -1
+    max_col = -1
+    for cell_index in sheet.cells.keys():
+        curr_row = cell_index[0]
+        curr_col = cell_index[1]
+        if (curr_row > max_row):
+            max_row = curr_row
+        if (curr_col > max_col):
+            max_col = curr_col
+
+    # Cycle through all the cells in order.
+    curr_cells = []
+    for curr_row in range(0, max_row + 1):
+        for curr_col in range(0, max_col + 1):
+            try:
+                curr_cell = { "value" : sheet.cell(curr_row, curr_col),
+                              "row" : curr_row + 1,
+                              "col" : curr_col + 1 }
+                curr_cells.append(curr_cell)
+            except KeyError:
+                pass
+
+    # Return the cells.
+    return curr_cells
+
+def pull_cells_sheet(sheet):
+    """
+    Pull all the cells from an xlrd or internal Sheet object.
+    """
+    curr_cells = _pull_cells_sheet_xlrd(sheet)
+    if (curr_cells is None):
+        curr_cells = _pull_cells_sheet_internal(sheet)
+    return curr_cells
+    
+def pull_cells_workbook(workbook):
+    """
+    Pull all the cells from all sheets in the given workbook.
+    """
+
+    # Cycle over all sheets.
+    all_cells = []
+    for sheet_index in range(0, len(workbook.sheet_names())):
+            
+        # Load the current sheet.
+        sheet = None
+        try:
+            sheet = workbook.sheet_by_index(sheet_index)
+        except:
+            continue
+
+        # Load the cells from this sheet.
+        curr_cells = pull_cells_sheet(sheet)
+        if (curr_cells is None):
+            continue
+        all_cells.extend(curr_cells)
+
+    # Done.
+    return all_cells
+
 # --- IMPORTS ------------------------------------------------------------------
 
 class ExcelSheet(object):
@@ -45,6 +217,8 @@ class ExcelSheet(object):
     def __init__(self, cells, name="Sheet1"):
         self.cells = cells
         self.name = name
+        self.__num_rows = None
+        self.__num_cols = None
 
     def __repr__(self):
         r = ""
@@ -52,6 +226,28 @@ class ExcelSheet(object):
         for cell in self.cells.keys():
             r += str(cell) + "\t=\t'" + str(self.cells[cell]) + "'\n"
         return r
+
+    def num_rows(self):
+        if (self.__num_rows is not None):
+            return self.__num_rows
+        max_row = -1
+        for cell in self.cells.keys():
+            curr_row = cell[0]
+            if (curr_row > max_row):
+                max_row = curr_row
+        self.__num_rows = max_row
+        return self.__num_rows
+
+    def num_cols(self):
+        if (self.__num_cols is not None):
+            return self.__num_cols
+        max_col = -1
+        for cell in self.cells.keys():
+            curr_col = cell[1]
+            if (curr_col > max_col):
+                max_col = curr_col
+        self.__num_cols = max_col
+        return self.__num_cols
     
     def cell(self, row, col):
         if ((row, col) in self.cells):

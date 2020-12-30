@@ -85,6 +85,7 @@ __version__ = '0.04'
 
 import sys
 import logging
+import string
 
 # TODO: add pyparsing to thirdparty folder, update setup.py
 from pyparsing import *
@@ -149,23 +150,31 @@ def pull_urls_excel_sheets(workbook):
     if (workbook is None):
         return []
 
-    # Look through each sheet.
+    # Look through each cell.
+    all_cells = excel.pull_cells_workbook(workbook)
     r = set()
-    try:
-        for sheet in workbook.sheets:
+    for cell in all_cells:
 
-            # Look through each cell.
-            for cell_index in sheet.cells.keys():
-                cell = sheet.cells[cell_index]
-                for url in re.findall(read_ole_fields.URL_REGEX, str(cell)):
-                    r.add(url.strip())
+        # Skip empty cells.
+        value = None
+        try:
+            value = str(cell["value"]).strip()
+        except UnicodeEncodeError:
+            value = ''.join(filter(lambda x:x in string.printable, cell["value"])).strip()
 
-    except TypeError:
+        if (len(value) == 0):
+            continue
+        
+        # Add http:// for cells that look like they might be URLs
+        # missing the http part.        
+        pat = r"[A-Za-z0-9_]{3,50}\.[A-Za-z]{2,10}/(?:[A-Za-z0-9_]{1,50}/)*[A-Za-z0-9_\.]{3,50}"
+        if (re.search(pat, value) is not None):
+            value = "http://" + value
 
-        # Not using our internal ExcelBook class, so .sheets is not
-        # iterable.
-        pass
-                
+        # Look for URLs in the cell value.
+        for url in re.findall(read_ole_fields.URL_REGEX, value):
+            r.add(url.strip())
+
     # Return any URLs found in cells.
     return r
 
@@ -283,6 +292,13 @@ class ViperMonkey(StubbedEngine):
             return
         self.modules.append(m)
         for name, _sub in m.subs.items():
+            # Skip duplicate subs that look less interesting than the old one.
+            if (name in self.globals):
+                old_sub = self.globals[name]
+                if (hasattr(old_sub, "statements")):
+                    if (len(_sub.statements) < len(old_sub.statements)):
+                        log.warning("Sub " + str(name) + " is already defined. Skipping new definition.")
+                        continue
             if (log.getEffectiveLevel() == logging.DEBUG):
                 log.debug('(1) storing sub "%s" in globals' % name)
             self.globals[name.lower()] = _sub
