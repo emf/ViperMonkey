@@ -90,11 +90,18 @@ def member_access(var, field):
 
     # Reading a field from a dict?
     field = str(field)
+    field_l = field.lower()
     if (isinstance(var, dict)):
-        if (field.lower() in var):
-            return var[field.lower()]
-        elif ((field.lower() == "text") and ("value" in var)):
+        if (field_l in var):
+
+            # Regular member access.
+            return var[field_l]
+
+        # Accessing text field?
+        elif ((field_l == "text") and ("value" in var)):
             return var["value"]
+
+        # Can't find field.
         else:
             return "NULL"
 
@@ -467,8 +474,12 @@ class _Chr(VbaLibraryFunc):
         if ((params is None) or (len(params) == 0)):
             return "NULL"
 
-        # Proper float conversion for Chr().
+        # Chr() called basically on a Cell object?
         param = params[0]
+        if (isinstance(param, dict) and ("value" in param)):
+            param = param["value"]
+        
+        # Proper float conversion for Chr().
         if (isinstance(param, float)):
             param = int(round(param))
         
@@ -937,10 +948,7 @@ class Left(VbaLibraryFunc):
         if s == None: return None
 
         # Arg should be a string.
-        try:
-            s = str(s)
-        except UnicodeDecodeError:
-            s = filter(isprint, s)
+        s = utils.safe_str_convert(s)
             
         # Don't modify the "**MATCH ANY**" special value.
         if (s.strip() == "**MATCH ANY**"):
@@ -1298,7 +1306,10 @@ class Eval(VbaLibraryFunc):
         if (isinstance(r, VBA_Object)):
             r = r.eval(context)
         return r
-            
+
+    def return_type(self):
+        return "UNKNOWN"
+    
 class Exists(VbaLibraryFunc):
     """
     Document or Scripting.Dictionary Exists() method.
@@ -1344,7 +1355,8 @@ class Execute(VbaLibraryFunc):
     def eval(self, context, params=None):
 
         # Sanity check.
-        if ((len(params) == 0) or
+        if ((params is None) or
+            (len(params) == 0) or
             (isinstance(params[0], VBA_Object)) or
             (isinstance(params[0], VbaLibraryFunc))):
             return "NULL"
@@ -1963,11 +1975,7 @@ class Split(VbaLibraryFunc):
         if ((params is None) or (len(params) == 0)):
             return "NULL"
         # TODO: Actually implement this properly.
-        string = None
-        try:
-            string = str(params[0])
-        except UnicodeEncodeError:
-            string = filter(isprint, params[0])
+        string = utils.safe_str_convert(params[0])
         sep = " "
         if ((len(params) > 1) and
             (isinstance(params[1], str)) and
@@ -2340,11 +2348,7 @@ class Join(VbaLibraryFunc):
         r = ""
         if (isinstance(strings, list)):
             for s in strings:
-                tmp_s = None
-                try:
-                    tmp_s = str(s)
-                except UnicodeEncodeError:
-                    tmp_s = filter(isprint, s)
+                tmp_s = utils.safe_str_convert(s)
                 r += tmp_s + sep
         else:
             r = str(strings)
@@ -3337,11 +3341,7 @@ class Environ(VbaLibraryFunc):
         env_vars["windir".lower()] = 'C:\\WINDOWS'
 
         # Get the environment variable name.
-        var_name = None
-        try:
-            var_name = str(params[0]).strip('%')
-        except UnicodeEncodeError:
-            var_name = filter(isprint, params[0]).strip('%')
+        var_name = utils.safe_str_convert(params[0]).strip('%')
 
         # Is this an environment variable we know?
         if context.expand_env_vars and var_name.lower() in env_vars:
@@ -3609,11 +3609,7 @@ class WriteLine(VbaLibraryFunc):
             data = params[2]
         
         # Save writes that look like they are writing URLs.
-        data_str = None
-        try:
-            data_str = str(data)
-        except UnicodeEncodeError:
-            data_str = filter(isprint, data)
+        data_str = utils.safe_str_convert(data)
         if (("http:" in data_str) or ("https:" in data_str)):
             context.report_action('Write URL', data_str, 'File Write')
         
@@ -3963,11 +3959,7 @@ class CreateObject(VbaLibraryFunc):
             return ""
         
         # Track contents of data written to 'ADODB.Stream'.
-        obj_type = None
-        try:
-            obj_type = str(params[0]).lower()
-        except UnicodeEncodeError:
-            obj_type = filter(isprint, params[0])
+        obj_type = utils.safe_str_convert(params[0]).lower()
         if (obj_type == 'ADODB.Stream'.lower()):
             context.open_file('ADODB.Stream')
 
@@ -4412,7 +4404,21 @@ class Range(VbaLibraryFunc):
             context.increase_general_errors()
             log.warning("Only 1 argument Range() calls supported. Returning NULL.")
             return "NULL"
-            
+
+        # Was Range() called on a single, already read cell?
+        if (isinstance(params[0], dict)):
+
+            # This is an indirect cell read. The cell address should be in the
+            # value of the current cell.
+            the_cell = params[0]
+            if ("value" in the_cell):
+                next_index = the_cell["value"]
+                return self.eval(context, [next_index])
+
+            # Unexpected. This is not a proper read cell dict.
+            log.warning("Unexpected cell dict " + str(the_cell) + ". Range() returning NULL.")
+            return "NULL"
+
         # Try each sheet until we read a cell.
         r = None
         col = None
@@ -4682,12 +4688,8 @@ class Print(VbaLibraryFunc):
             return
 
         # Save writes that look like they are writing URLs.
-        data_str = None
-        try:
-            data_str = str(params[0])
-        except UnicodeEncodeError:
-            data_str = filter(isprint, params[0])
-        if (("http:" in data_str) or ("https:" in data_str)):
+        data_str = utils.safe_str_convert(params[0])
+        if (("http:" in data_str.lower()) or ("https:" in data_str.lower())):
             context.report_action('Write URL', data_str, 'Debug Print')
 
         if (params[0] is not None):

@@ -35,6 +35,7 @@ https://github.com/decalage2/ViperMonkey
 
 import re
 from curses_ascii import isascii
+from curses_ascii import isprint
 import base64
 
 import logging
@@ -50,6 +51,18 @@ except ImportError:
     from logger import CappedFileHandler
 from logging import LogRecord
 from logging import FileHandler
+import excel
+
+def safe_str_convert(s):
+    """
+    Convert a string to ASCII without throwing a unicode decode error.
+    """
+    try:
+        return str(s)
+    except UnicodeDecodeError:
+        return filter(isprint, s)
+    except UnicodeEncodeError:
+        return filter(isprint, s)
 
 class Infix:
     """
@@ -73,6 +86,12 @@ def safe_plus(x,y):
     Handle "x + y" where x and y could be some combination of ints and strs.
     """
 
+    # Handle Excel Cell objects. Grrr.
+    if excel.is_cell_dict(x):
+        x = x["value"]
+    if excel.is_cell_dict(y):
+        y = y["value"]
+    
     # Handle NULLs.
     if (x == "NULL"):
         x = 0
@@ -110,6 +129,33 @@ def safe_plus(x,y):
 
 # Safe plus infix operator. Ugh.
 plus=Infix(lambda x,y: safe_plus(x, y))
+
+def safe_equals(x,y):
+    """
+    Handle "x = y" where x and y could be some combination of ints and strs.
+    """
+
+    # Handle NULLs.
+    if (x == "NULL"):
+        x = 0
+    if (y == "NULL"):
+        y = 0
+    
+    # Easy case first.
+    if (type(x) == type(y)):
+        return x == y
+
+    # Booleans and ints can be directly compared.
+    if ((isinstance(x, bool) and (isinstance(y, int))) or
+        (isinstance(y, bool) and (isinstance(x, int)))):
+        return x == y
+        
+    # Punt. Just convert things to strings and hope for the best.
+    return str(x) == str(y)
+
+# Safe equals and not equals infix operators. Ugh. Loosely typed languages are terrible.
+eq=Infix(lambda x,y: safe_equals(x, y))
+neq=Infix(lambda x,y: (not safe_equals(x, y)))
 
 def safe_print(text):
     """
@@ -216,7 +262,7 @@ class vb_RegExp(object):
     def Replace(self, string, rep):
         pat = self._get_python_pattern()
         if (pat is None):
-            return s
+            return string
         rep = re.sub(r"\$(\d)", r"\\\1", rep)
         r = string
         try:

@@ -1172,8 +1172,6 @@ class Let_Statement(VBA_Object):
             elif (((context.get_type(self.name) == "Integer") or
                    (context.get_type(self.name) == "Long")) and
                   (isinstance(value, str))):
-                print "SET INT"
-                print self.name
                 try:
                     if (value == "NULL"):
                         value = 0
@@ -1559,7 +1557,8 @@ class For_Statement(VBA_Object):
         loop_body = ""
         end_var = str(end)
         loop_body += indent_str + " " * 4 + "if (int(float(" + loop_var + ")/(" + end_var + " if " + end_var + " != 0 else 1)*100) == " + prog_var + "):\n"
-        loop_body += indent_str + " " * 8 + "safe_print(str(int(float(" + loop_var + ")/(" + end_var + " if " + end_var + " != 0 else 1)*100)) + \"% done with loop " + str(self) + "\")\n"
+        body_escaped = str(self).replace('"', '\\"').replace("\\n", " :: ")
+        loop_body += indent_str + " " * 8 + "safe_print(str(int(float(" + loop_var + ")/(" + end_var + " if " + end_var + " != 0 else 1)*100)) + \"% done with loop " + body_escaped + "\")\n"
         loop_body += indent_str + " " * 8 + prog_var + " += 1\n"
         body_str = to_python(self.statements, tmp_context, params=params, indent=indent+4, statements=True)
         if (body_str.strip() == '""'):
@@ -2145,7 +2144,8 @@ class For_Each_Statement(VBA_Object):
         loop_body = ""
         loop_body += indent_str + " " * 4 + pos_var + " += 1\n"
         loop_body += indent_str + " " * 4 + "if (int(float(" + pos_var + ")/(" + len_var + " if " + len_var + " != 0 else 1)*100) == " + prog_var + "):\n"
-        loop_body += indent_str + " " * 8 + "safe_print(str(int(float(" + pos_var + ")/(" + len_var + " if " + len_var + " != 0 else 1)*100)) + \"% done with loop " + str(self) + "\")\n"
+        body_escaped = str(self).replace('"', '\\"').replace("\\n", " :: ")
+        loop_body += indent_str + " " * 8 + "safe_print(str(int(float(" + pos_var + ")/(" + len_var + " if " + len_var + " != 0 else 1)*100)) + \"% done with loop " + body_escaped + "\")\n"
         loop_body += indent_str + " " * 8 + prog_var + " += 1\n"
         loop_body += to_python(self.statements, tmp_context, params=params, indent=indent+4, statements=True)
             

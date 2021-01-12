@@ -476,6 +476,8 @@ def _boilerplate_to_python(indent):
     boilerplate = indent_str + "import core.vba_context\n"
     boilerplate += indent_str + "from core.utils import safe_print\n"
     boilerplate += indent_str + "from core.utils import plus\n"
+    boilerplate += indent_str + "from core.utils import eq\n"
+    boilerplate += indent_str + "from core.utils import neq\n"
     boilerplate += indent_str + "import core.utils\n"
     boilerplate += indent_str + "from core.vba_object import update_array\n"
     boilerplate += indent_str + "from core.vba_object import coerce_to_num\n"
@@ -754,6 +756,13 @@ def _get_var_vals(item, context, global_only=False):
         # Save the variable value.
         r[var] = val
 
+        # Save the regex pattern if this is a regex object.
+        if (utils.safe_str_convert(val) == "RegExp"):
+            if (context.contains("RegExp.pattern")):
+                r[var + ".Pattern"] = to_python(context.get("RegExp.pattern"))
+            if (context.contains("RegExp.global")):
+                r[var + ".Global"] = to_python(context.get("RegExp.global"))
+        
         # Mark this variable as being set in the Python code to avoid
         # embedded loop Python code generation stomping on the value.
         context.set(var, "__ALREADY_SET__", force_local=True)
