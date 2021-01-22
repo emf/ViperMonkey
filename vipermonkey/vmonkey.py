@@ -1368,6 +1368,7 @@ def _process_file (filename,
                                      var_name + ".Title",
                                      var_name + ".Value",
                                      var_name + ".Caption",
+                                     var_name + ".Content",
                                      var_name + ".ControlTipText",
                                      "me." + var_name,
                                      "me." + var_name + ".Tag",
@@ -1376,6 +1377,7 @@ def _process_file (filename,
                                      "me." + var_name + ".Title",
                                      "me." + var_name + ".Value",
                                      "me." + var_name + ".Caption",
+                                     "me." + var_name + ".Content",
                                      "me." + var_name + ".ControlTipText"]
                 for tmp_var_name in var_name_variants:
                     tmp_var_val = var_val
