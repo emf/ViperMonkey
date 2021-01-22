@@ -5,8 +5,19 @@ ViperMonkey is a VBA Emulation engine written in Python, designed to analyze
 and deobfuscate malicious VBA Macros contained in Microsoft Office files
 (Word, Excel, PowerPoint, Publisher, etc).
 
-See my article "[Using VBA Emulation to Analyze Obfuscated Macros](http://decalage.info/vba_emulation)",
+See the article "[Using VBA Emulation to Analyze Obfuscated Macros](http://decalage.info/vba_emulation)",
 for real-life examples of malware deobfucation with ViperMonkey.
+
+ViperMonkey was also demonstrated at the Black Hat Europe 2019 conference: 
+see the [slides](https://decalage.info/en/bheu2019) 
+and [video](https://youtu.be/l5sMPGjtKn0?list=PLH15HpR5qRsXiPOP3gxN6ultoj0rAR6Yn&t=1118) (at 18:38).
+
+ViperMonkey was created by [Philippe Lagadec](https://github.com/decalage2) in 2015-2016, and the project
+is maintained in the repository https://github.com/decalage2/ViperMonkey. 
+Since November 2017, most of the development is done by [Kirk Sayre](https://github.com/kirk-sayre-work) 
+and other contributors in the repository https://github.com/kirk-sayre-work/ViperMonkey. 
+The main repository is synchronised regularly, but cutting edge improvements are usually
+available first in Kirk's version.
 
 **Quick links:**
 [Report Issues/Suggestions/Questions](https://github.com/decalage2/ViperMonkey/issues) -
@@ -30,30 +41,36 @@ Download and Install:
 **Easy Install**
 
 1. Install docker.
-2. Run 'docker/dockermonkey.sh MYFILE' to analyze file MYFILE.
+2. Run `docker/dockermonkey.sh MYFILE` to analyze file MYFILE.
 
 dockermonkey.sh wil automatically pull down a preconfigured docker container, update ViperMonkey to
 the latest version in the container, and then analyze MYFILE by running ViperMonkey in the
 container. No other packages or configuration will need to be performed.
 
-**Installation using PyPy**
+For information on using dockermonkey.sh run `docker/dockermonkey.sh -h`.
 
-For performance reasons, it is highly recommended to use PyPy, but it is
+**Installation using PyPy (recommended)**
+
+For performance reasons, it is highly recommended to use PyPy (5x faster), but it is
 also possible to run Vipermonkey with the normal Python interpreter
-(CPython).
+(CPython) if you cannot use PyPy.
 
 1. If PyPy is not installed on your system, see http://pypy.org/download.html and download **PyPy 2.7**. (not 3.x)
 2. Check if pip is installed for pypy: run `pypy -m pip`
 3. If pip is not installed yet, run `pypy -m ensurepip` on Windows, or `sudo -H pypy -m ensurepip` on Linux/Mac
-4. Download the archive from the repository: https://github.com/decalage2/ViperMonkey/archive/master.zip
-5. Extract it in the folder of your choice, and open a shell/cmd window in that folder.
-6. Under Ubuntu install pypy-dev (sudo apt-get install pypy-dev).
-7. Install dependencies by running `pypy -m pip install -U -r requirements.txt` on Windows, or `sudo -H pypy -m pip install -U -r requirements.txt` on Linux/Mac
-8. Check that Vipermonkey runs without error: `pypy vmonkey.py`
+4. Make sure pip is up-to-date, by running `pypy -m pip install -U pip`
+5. Download the archive from the repository: https://github.com/decalage2/ViperMonkey/archive/master.zip
+6. Extract it in the folder of your choice, and open a shell/cmd window in that folder.
+7. Under Ubuntu install pypy-dev (sudo apt-get install pypy-dev).
+8. Install dependencies by running `pypy -m pip install -U -r requirements.txt` on Windows, or `sudo -H pypy -m pip install -U -r requirements.txt` on Linux/Mac
+9. Check that Vipermonkey runs without error: `pypy vmonkey.py`
 
 **Installation using CPython**
 
 1. Make sure you have the latest Python 2.7 installed: https://www.python.org/downloads/
+2. If you have both Python 2 and 3 versions installed, use `pip2` instead of `pip` in the 
+   following commands, to install in Python 2 and not 3.
+4. Make sure pip is up-to-date, by running `pip install -U pip`
 2. Use pip to download and install vipermonkey with all its dependencies,
    by running the following command on Windows:
 ```
@@ -70,10 +87,17 @@ sudo -H pip install -U https://github.com/decalage2/ViperMonkey/archive/master.z
 Usage:
 ------
 
+To run ViperMonkey in a Docker container with the `-s`, `--jit`, and
+`--iocs` options do:
+
+```text
+docker/dockermonkey.sh <file>
+```
+
 To parse and interpret VBA macros from a document, use the vmonkey script:
 
 ```text
-vmonkey <file>
+vmonkey.py <file>
 ```
 
 To make analysis faster (see the Speedup section), do:
@@ -82,12 +106,52 @@ To make analysis faster (see the Speedup section), do:
 pypy vmonkey.py -s <file>
 ```
 
+*Note:* It is recommended to always use the `-s` option. When given
+ the `-s` option ViperMonkey modifies some difficult to parse Visual
+ Basic language constructs so that the ViperMonkey parser can
+ correctly parse the input.
+
 If the output is too verbose and too slow, you may reduce the logging level using the
 -l option:
 
 ```text
-vmonkey -l warning <file>
+vmonkey.py -l warning <file>
 ```
+
+If the sample being analyzed has long running loops that are causing
+emulation to be unacceptably slow, use the `--jit` option to convert
+VB loops directly to Python in a JIT fashion during emulation.
+
+```text
+vmonkey.py --jit <file>
+```
+
+*Note:* ViperMonkey's Python JIT loop conversion converts VB loops to
+ Python and `evals` the generated Python code. While the Python
+ conversion process is based on the parsed AST (not directly on the VB
+ text) and VB data values are escaped/converted/modified to become
+ valid in Python, any use of `eval` in Python potentially introduces a
+ security risk. If this is a concern the `dockermonkey.sh` script can be
+ used to run ViperMonkey in a sandboxed manner. `dockermonkey.sh` runs
+ ViperMonkey in a fresh Docker container on each run (no file system
+ modifications persist between runs) and networking is turned off in
+ the Docker container.
+
+Sometimes a malicious VBScript or Office file will generate IOCs
+during execution that are not used or that ViperMonkey does not see
+used. These intermediate IOCs are tracked by ViperMonkey during the
+emulation process and can be reported with the `--iocs` option.
+
+```text
+vmonkey --iocs <file>
+```
+
+Note that one of the intermediate IOCs reported by ViperMonkey is
+injected shell code bytes. If the sample under analysis performs
+process injection directly in VB, ViperMonkey will report the injected
+byte values as an intermediate IOC with the `--iocs` flag. These byte
+values can then be written into a raw shell code file which can be
+further analyzed with a shell code emulator.
 
 **oletools Version**
 
@@ -132,6 +196,10 @@ ViperMonkey emulates some file writing behavior. The SHA256 hash of
 dropped files is reported in the ViperMonkey analysis results and the
 actual dropped files are saved in the directory MALDOC_artifacts/,
 where MALDOC is the name of the analyzed maldoc file.
+
+ViperMonkey also searches Office 97 and Office 2007+ files for
+embedded PE files. These are automatically extracted and reported as
+dropped files in the MALDOC_artifacts/ directory.
 
 **Emulating Specific VBA Functions**
 
@@ -229,7 +297,7 @@ License
 This license applies to the ViperMonkey package, apart from the thirdparty folder which contains third-party files
 published with their own license.
 
-The ViperMonkey package is copyright (c) 2015-2018 Philippe Lagadec (http://www.decalage.info)
+The ViperMonkey package is copyright (c) 2015-2020 Philippe Lagadec (http://www.decalage.info)
 
 All rights reserved.
 

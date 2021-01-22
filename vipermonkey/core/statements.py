@@ -388,6 +388,8 @@ class TaggedBlock(VBA_Object):
         do_const_assignments(self.block, context)
 
         for s in self.block:
+            if (not hasattr(s, "eval")):
+                continue
             s.eval(context, params=params)
 
             # Was there an error that will make us jump to an error handler?
@@ -568,7 +570,10 @@ class Dim_Statement(VBA_Object):
 
             # Keep the current variable value if this variable already exists.
             if (context.contains(var[0], local=True)):
-                curr_init_val = to_python(context.get(var[0]), context)
+                vm_val = context.get(var[0])
+                if (vm_val == "__ALREADY_SET__"):
+                    vm_val = context.get("__ORIG__" + var[0])
+                curr_init_val = to_python(vm_val, context)
 
             # Handle VB NULL values.
             if (curr_init_val == '"NULL"'):
@@ -578,6 +583,8 @@ class Dim_Statement(VBA_Object):
             # later calls of to_python() know the type of the variable.
             context.set(var[0], "__ALREADY_SET__", var_type=curr_type)
             context.set(var[0], "__ALREADY_SET__", var_type=curr_type, force_global=True)
+            context.set("__ORIG__" + var[0], curr_init_val, force_local=True)
+            context.set("__ORIG__" + var[0], curr_init_val, force_global=True)
                 
             # Set the initial value of the declared variable.
             var_name = utils.fix_python_overlap(str(var[0]))
@@ -3908,9 +3915,7 @@ class Call_Statement(VBA_Object):
 
         # Are we calling a member access expression?
         if isinstance(self.name, MemberAccessExpression):
-            # If we have parameters, then we must have an error
-            # because the MemberAccessExpression is going to ignore them.
-            assert not self.params, 'Unexpected parameters. Parsing has failed.'
+
             # Just evaluate the expression as the call.
             if (log.getEffectiveLevel() == logging.DEBUG):
                 log.debug("Call of member access expression " + str(self.name))
